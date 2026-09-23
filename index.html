@@ -1804,10 +1804,24 @@ function buildGoalList(){
     out.push({id:g.id, name:g.name || "(unnamed)", priority:(g.priority == null ? 500 : g.priority),
               kind:g.kind, target_c:target, funded_c:funded,
               accountId: acct ? acct.id : null, apr_bps:apr, locked:false,
-              targetDate:g.targetDate || null, exclusive:false});
+              targetDate:g.targetDate || null, exclusive:false,
+              unlinked: !acct && g.kind !== "payoff"});
+  }
+
+  // The sweep account takes everything left once every goal is funded, so surplus
+  // compounds instead of idling as cash. Effectively bottomless, and always last.
+  const sweep = state.accounts.find(a => a.isSweep && ACCOUNT_KINDS[a.kind] && !ACCOUNT_KINDS[a.kind].debt);
+  if (sweep){
+    out.push({id:"g-sweep", name:sweep.name, priority:9999, kind:"invest",
+              target_c:SWEEP_TARGET, funded_c:Math.max(0, sweep.openingBalance_c || 0),
+              accountId:sweep.id, apr_bps:sweep.apr_bps || 0, locked:false,
+              targetDate:null, exclusive:false, isSweep:true, unlinked:false});
   }
   return out;
 }
+
+/** A target no plan will ever reach, so the sweep goal never closes. */
+const SWEEP_TARGET = 1e15;
 
 /** Stamp each goal with its deadline as a day index, clamped into the horizon. */
 function stampDeadlines(goals, start, nDays){
@@ -3490,6 +3504,47 @@ function paneDashboard(){
   const ms = t0 ? ((typeof performance !== "undefined" ? performance.now() : 0) - t0) : 0;
 
   const chg = changeStrip(R); if (chg) pane.appendChild(chg);
+
+  // A goal with no account behind it is money parked in checking earning nothing.
+  // It is easy to create by accident, because the account dropdown defaults to none.
+  const orphan = (R.goals || []).filter(g => g.unlinked);
+  if (orphan.length){
+    const b = el("div", "banner warn");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", orphan.length === 1 ? "One goal has no account behind it. "
+                                                  : orphan.length + " goals have no account behind them. "));
+    t.appendChild(document.createTextNode(
+      orphan.map(g => g.name).join(", ") + " — money set aside for " +
+      (orphan.length === 1 ? "it" : "them") + " stays in " + esc(sim.opName) +
+      " and earns nothing. Pick a Linked account on the Goals tab so it actually goes somewhere and grows."));
+    b.appendChild(t);
+    const go = el("button", "btn sm", "Fix on Goals");
+    go.type = "button";
+    go.addEventListener("click", () => { state.tab = "goals"; render(); window.scrollTo({top:0}); });
+    b.appendChild(go);
+    pane.appendChild(b);
+  }
+
+  // Nowhere for surplus to go once the goals close.
+  if (!state.accounts.some(a => a.isSweep) && R.goals && R.goals.length){
+    const idle = sim.cash[sim.nDays] - sim.floorSeries[sim.nDays];
+    if (idle > 5000000){
+      const b = el("div", "banner warn");
+      const t = el("div", "sp");
+      t.appendChild(el("b", "", money0(idle) + " ends up sitting in cash. "));
+      t.appendChild(document.createTextNode(
+        "Once every goal is funded the surplus has nowhere to go, so it piles up in " + esc(sim.opName) +
+        " earning nothing. Mark an investment account “Invest the rest here” on the Accounts tab and it " +
+        "will compound instead."));
+      b.appendChild(t);
+      const go = el("button", "btn sm", "Set one");
+      go.type = "button";
+      go.addEventListener("click", () => { state.tab = "accounts"; render(); window.scrollTo({top:0}); });
+      b.appendChild(go);
+      pane.appendChild(b);
+    }
+  }
+
   const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
 
   // Sinking funds larger than the cash actually held. This is a DIFFERENT problem from
@@ -3753,6 +3808,18 @@ function paneAccounts(){
           persistCore("accounts"); render();
         });
       }},
+    {label:"Leftover cash", w:"minmax(150px,1fr)", title:"Send everything left over, once every goal is funded, into this account — where it compounds instead of sitting idle.",
+      cell:(a) => {
+        const k = ACCOUNT_KINDS[a.kind];
+        const shim = {id:a.id, s: a.isSweep ? "yes" : "no"};
+        return cellSelect(shim, "s", [{value:"no", label:"—"}, {value:"yes", label:"Invest the rest here"}],
+          v => {
+            // exactly one sweep account, or the surplus would have two homes
+            for (const x of state.accounts) x.isSweep = false;
+            a.isSweep = (v === "yes");
+            persistCore("accounts"); render();
+          }, {disabled: !(k && !k.debt)});
+      }},
     {label:"Contrib is", w:"minmax(120px,.85fr)", title:"Mandatory contributions reduce free cash. Discretionary ones the solver may redirect.",
       cell:(a) => {
         const shim = {id:a.id, m: a.contribution ? String(a.contribution.mandatory) : "true"};
@@ -3774,7 +3841,7 @@ function paneAccounts(){
       state.accounts.push({
         id: uid("a"), name: "", kind: "cash", openingBalance_c: 0, apr_bps: 0,
         compounding: "monthly", minPayment_c: 0, escrow_c: 0, paymentMode: "minimum",
-        dueDay: 0, originalPrincipal_c: 0,
+        isSweep: false, dueDay: 0, originalPrincipal_c: 0,
         originationDate: "", contribution: null, participatesInBudget: true
       });
       persistCore("accounts"); render();
@@ -4261,19 +4328,28 @@ function panePlan(){
     const mid = el("div", "gmid");
     const t = el("div", "gtitle");
     t.appendChild(el("b", "", g.name));
-    if (g.locked) t.appendChild(el("span", "tag lock", "priority 0 · locked"));
+    if (g.isSweep) t.appendChild(el("span", "tag lock", "everything left over"));
+    else if (g.locked) t.appendChild(el("span", "tag lock", "priority 0 · locked"));
     else t.appendChild(el("span", "tag", "priority " + g.priority));
+    if (g.unlinked) t.appendChild(el("span", "tag neg", "no account — stays in cash"));
     if (g.kind === "payoff" && g.apr_bps) t.appendChild(el("span", "tag", (g.apr_bps / 100).toFixed(2) + "% APR"));
     if (g.targetDate) t.appendChild(el("span", "tag", "wants " + shortDate(g.targetDate)));
     mid.appendChild(t);
-    mid.appendChild(el("div", "gsub", "Target " + money0(g.target_c) +
-      (a ? "" : " · reaches " + money0(got) + " (" + Math.round(100 * got / Math.max(1, g.target_c)) + "%) within the horizon")));
-    const bar = el("div", "bar");
-    const fill = el("div", "barfill");
-    fill.style.width = Math.max(1, Math.min(100, 100 * got / Math.max(1, g.target_c))) + "%";
-    if (!a) fill.style.background = "var(--warn)";
-    bar.appendChild(fill);
-    mid.appendChild(bar);
+    if (g.isSweep){
+      mid.appendChild(el("div", "gsub",
+        "Everything left once the goals above are funded goes here" +
+        (g.apr_bps ? ", compounding at " + (g.apr_bps / 100).toFixed(2) + "% a year" : "") +
+        " · reaches " + money0(got)));
+    } else {
+      mid.appendChild(el("div", "gsub", "Target " + money0(g.target_c) +
+        (a ? "" : " · reaches " + money0(got) + " (" + Math.round(100 * got / Math.max(1, g.target_c)) + "%) within the horizon")));
+      const bar = el("div", "bar");
+      const fill = el("div", "barfill");
+      fill.style.width = Math.max(1, Math.min(100, 100 * got / Math.max(1, g.target_c))) + "%";
+      if (!a) fill.style.background = "var(--warn)";
+      bar.appendChild(fill);
+      mid.appendChild(bar);
+    }
     row.appendChild(mid);
     const rt = el("div", "gright");
     if (a){
