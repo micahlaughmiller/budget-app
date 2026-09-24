@@ -1,7 +1,6 @@
-<title>Better Budget Cloud</title>
+<title>Better Budget Template</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 
 <style>
@@ -243,22 +242,6 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .fixtext{font-size:12.5px; color:var(--muted); flex:1 1 260px; min-width:0}
 .fixbtns{display:flex; gap:7px; flex-wrap:wrap; margin-top:9px}
 
-/* ---------- sign-in gate ---------- */
-.authbox{
-  max-width:400px; margin:56px auto; padding:26px;
-  border:1px solid var(--line); border-radius:var(--r); background:var(--surface); box-shadow:var(--shadow);
-}
-.authbox h2{font-size:22px; margin-bottom:6px}
-.authsub{font-size:13px; color:var(--muted); margin:0 0 18px}
-.authfoot{font-size:11.5px; color:var(--faint); margin:16px 0 0}
-.authbox .fld input{max-width:none; width:100%}
-.autherr{
-  font-size:12.5px; padding:9px 11px; border-radius:var(--r); margin-bottom:14px;
-  background:var(--neg-soft); color:var(--neg); border:1px solid var(--neg);
-}
-.autherr.busy{background:var(--surface-2); color:var(--muted); border-color:var(--line-2)}
-.autherr.ok{background:var(--accent-soft); color:var(--accent); border-color:var(--accent)}
-
 /* ---------- what changed ---------- */
 .changed{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px}
 .clabel{font-size:10.5px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:600}
@@ -496,7 +479,7 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 
 <div class="topbar">
   <div class="topbar-in">
-    <div class="mark">Better<span>·</span>Budget</div>
+    <div class="mark">Better<span>·</span>Budget <span style="font-family:var(--font-ui);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">template</span></div>
     <div class="topbar-sp"></div>
     <div class="savechip"><span class="dot" id="saveDot"></span><span id="saveTxt">starting…</span></div>
     <button class="btn sm ghost" id="themeBtn" title="Toggle light / dark">Theme</button>
@@ -512,9 +495,10 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
   <div id="panes" role="tabpanel"></div>
 
   <div class="foot">
-    <b>Signed-in edition.</b> Each account holds its own budget in Supabase, kept apart by row-level
-    security in the database itself — not by anything this page does. Your data follows you to any
-    device you sign in on.
+    <b>A blank Better Budget.</b> One checking account and a starter set of categories, everything else
+    empty and waiting for your numbers. Work through Setup in order: income, expenses, the savings buffer,
+    debts and investments, then goals. The Dashboard and Plan tabs light up as soon as there is enough
+    to project.
     Money is stored in integer cents; dates as <code>YYYY-MM-DD</code>. Every occurrence is computed from its
     anchor by index rather than chained off the previous date, which is what stops month-end drift.
     Monthly equivalents use exact annual rates (weekly × 52/12, not the legacy workbook's × 30/7) and are
@@ -2931,141 +2915,6 @@ function predictCategory(payee){
 }
 
 /* ============================================================
-   3f. SUPABASE — accounts, and one budget per signed-in person
-   ============================================================ */
-
-/* ---------------------------------------------------------------
-   Fill these in from Supabase -> Project Settings -> API.
-   Both are meant to be public: the anon key only ever acts as the
-   signed-in user, and Row Level Security is what separates budgets.
-   --------------------------------------------------------------- */
-const SUPABASE_URL      = "PASTE_YOUR_PROJECT_URL_HERE";
-const SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_KEY_HERE";
-
-const cloudConfigured = () =>
-  /^https:\/\/.+\.supabase\.co\/?$/.test(SUPABASE_URL) && SUPABASE_ANON_KEY.length > 40;
-
-let sb = null, sbUser = null;
-
-function sbInit(){
-  if (sb || !cloudConfigured()) return sb;
-  const lib = window.supabase;
-  if (!lib || !lib.createClient) return null;
-  sb = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: {persistSession: true, autoRefreshToken: true}
-  });
-  return sb;
-}
-
-/** Every row this user owns. RLS means the query cannot return anyone else's. */
-async function sbLoadAll(){
-  const {data, error} = await sb.from("documents").select("path,data");
-  if (error) throw error;
-  for (const row of (data || [])){
-    const parts = String(row.path).split("/");
-    const coll = parts[0], id = parts[1];
-    const d = row.data || {};
-    if (coll === "core"){
-      if (id === "settings")         state.settings    = d.settings || blankSettings();
-      else if (id === "accounts")    state.accounts    = d.items || [];
-      else if (id === "categories")  state.categories  = d.items || [];
-      else if (id === "recurrences") state.recurrences = d.items || [];
-      else if (id === "goals")       state.goals       = d.items || [];
-    } else if (coll === "txns"){
-      state.txMonths[id] = d.items || [];
-    } else if (coll === "budget"){
-      state.budgetMonths[id] = {budgeted: d.budgeted || {}};
-    }
-  }
-  return (data || []).length;
-}
-
-async function sbWrite(path, body){
-  const {error} = await sb.from("documents")
-    .upsert({user_id: sbUser.id, path: path, data: body}, {onConflict: "user_id,path"});
-  if (error) throw error;
-}
-
-/* ---------- the sign-in gate ---------- */
-
-function authGate(message){
-  const host = document.getElementById("panes");
-  for (const id of ["nav", "strip", "stripnote"]){
-    const n = document.getElementById(id);
-    if (n) n.hidden = true;
-  }
-  host.textContent = "";
-
-  const box = el("div", "authbox");
-  box.appendChild(el("h2", "", "Better Budget"));
-  box.appendChild(el("p", "authsub",
-    "Sign in to reach your budget. Everyone who signs up gets their own — nobody can see anyone else's."));
-
-  const err = el("div", "autherr");
-  err.hidden = !message;
-  if (message) err.textContent = message;
-  box.appendChild(err);
-
-  const field = (label, type, id, auto) => {
-    const f = el("div", "fld");
-    f.appendChild(el("label", "", label));
-    const i = el("input");
-    i.type = type; i.id = id; i.autocomplete = auto;
-    f.appendChild(i);
-    box.appendChild(f);
-    return i;
-  };
-  const email = field("Email", "email", "auth-email", "username");
-  const pass  = field("Password", "password", "auth-pass", "current-password");
-
-  const tools = el("div", "tools");
-  const signIn = el("button", "btn primary", "Sign in");
-  const signUp = el("button", "btn", "Create an account");
-  signIn.type = "button"; signUp.type = "button";
-
-  const busy = (what) => {
-    signIn.disabled = signUp.disabled = true;
-    err.hidden = false; err.className = "autherr busy"; err.textContent = what;
-  };
-  const fail = (e) => {
-    err.hidden = false; err.className = "autherr";
-    err.textContent = (e && e.message) ? e.message : String(e);
-    signIn.disabled = signUp.disabled = false;
-  };
-
-  signIn.addEventListener("click", async () => {
-    busy("Signing in…");
-    try {
-      const {error} = await sb.auth.signInWithPassword({email: email.value.trim(), password: pass.value});
-      if (error) throw error;
-      await boot();
-    } catch (e){ fail(e); }
-  });
-  signUp.addEventListener("click", async () => {
-    busy("Creating your account…");
-    try {
-      const {error} = await sb.auth.signUp({email: email.value.trim(), password: pass.value});
-      if (error) throw error;
-      err.className = "autherr ok";
-      err.textContent = "Account created. If the project asks for email confirmation, click the link we sent, then sign in.";
-      signIn.disabled = signUp.disabled = false;
-    } catch (e){ fail(e); }
-  });
-  tools.appendChild(signIn); tools.appendChild(signUp);
-  box.appendChild(tools);
-  pass.addEventListener("keydown", (e) => { if (e.key === "Enter") signIn.click(); });
-
-  box.appendChild(el("p", "authfoot",
-    "Your budget lives in your own account and is not shared. Passwords are reset from the Supabase dashboard."));
-  host.appendChild(box);
-}
-
-async function signOut(){
-  try { await sb.auth.signOut(); } catch (e){}
-  location.reload();
-}
-
-/* ============================================================
    4. PERSISTENCE — artifact db, with a localStorage fallback
    ============================================================ */
 
@@ -3108,11 +2957,6 @@ async function flushWrites(){
     while (store.queue.size){
       const [path, body] = store.queue.entries().next().value;
       store.queue.delete(path);
-      if (store.mode === "supabase"){
-        try { await sbWrite(path, body); }
-        catch (e){ reportWriteFailure(e); failed = true; }
-        continue;
-      }
       if (store.mode !== "db" || !store.db){ saveLocalMirror(); continue; }
       try {
         await store.db.doc(path).set(body);
@@ -3189,19 +3033,6 @@ function persistBudget(key){
 }
 
 async function loadAll(){
-  // 0. Supabase, when configured: only the signed-in user's own rows
-  if (cloudConfigured() && sbInit()){
-    const sess = await sb.auth.getSession();
-    const session = sess && sess.data ? sess.data.session : null;
-    if (!session){ store.mode = "anon"; return; }
-    sbUser = session.user;
-    store.mode = "supabase";
-    const n = await sbLoadAll();
-    if (!n) await seedFirstRun();
-    setSave("ok", "saved to your account");
-    return;
-  }
-
   // 1. try the artifact database
   let db = null;
   try { db = await window.claude?.use?.("db"); } catch (e){ db = null; }
@@ -5814,38 +5645,10 @@ function initTheme(){
 async function boot(){
   initTheme();
   state.settings = blankSettings();
-  state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
-  state.txMonths = {}; state.budgetMonths = {};
-
-  if (cloudConfigured() && !sbInit()){
-    document.getElementById("panes").textContent =
-      "Could not load the Supabase client. Check your connection and reload.";
-    return;
-  }
+  render();                       // paint immediately; never block first paint on a capability
   setSave("", "loading…");
   await loadAll();
-
-  if (store.mode === "anon"){ authGate(null); setSave("", "signed out"); return; }
-
-  for (const id of ["nav", "strip", "stripnote"]){
-    const n = document.getElementById(id);
-    if (n) n.hidden = false;
-  }
   render();
-  if (store.mode === "supabase") mountAccountChip();
-}
-
-function mountAccountChip(){
-  const bar = document.querySelector(".topbar-in");
-  if (!bar || document.getElementById("whoami")) return;
-  const who = el("span", "savechip", sbUser && sbUser.email ? sbUser.email : "signed in");
-  who.id = "whoami";
-  const out = el("button", "btn sm ghost", "Sign out");
-  out.type = "button";
-  out.addEventListener("click", signOut);
-  const anchor = bar.querySelector("#themeBtn");
-  bar.insertBefore(who, anchor);
-  bar.insertBefore(out, anchor);
 }
 
 boot();

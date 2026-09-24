@@ -1,0 +1,10 @@
+# Personal data — never published
+my-budget.html
+my-budget-backup.json
+*-backup.json
+data-backup.json
+
+# Source workbooks
+*.xls
+*.xlsx
+*.xlsm
