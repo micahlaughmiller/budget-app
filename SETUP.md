@@ -18,22 +18,28 @@ browser does can reach another person's rows.
 
 ## 3. Put your keys into the app
 
-Dashboard → **Project Settings** → **API**. Copy:
+Supabase renamed these in 2025. You need two things:
 
-- **Project URL** — looks like `https://abcdefgh.supabase.co`
-- **anon public** key — a long string starting `eyJ...`
+**Project URL** — Project Settings → **Data API** → *Project URL*
+(older dashboards: Project Settings → **API**). Looks like `https://abcdefgh.supabase.co`.
+
+**Publishable key** — Project Settings → **API Keys** → the row marked *publishable*.
+Starts `sb_publishable_`. This is what used to be called the **anon public** key; if your
+project still shows a **Legacy API keys** tab, the `eyJ...` key there works just as well.
 
 Open `index.html` and replace the two placeholders near the top of the script:
 
 ```js
-const SUPABASE_URL      = "https://abcdefgh.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOi...";
+const SUPABASE_URL = "https://abcdefgh.supabase.co";
+const SUPABASE_KEY = "sb_publishable_Ab12Cd34...";
 ```
 
-**Both are meant to be public.** The anon key identifies the project, not a person —
-it can only ever act as whoever is signed in, and row-level security does the rest.
-It is safe in a public repository. Your database password and the `service_role` key
-are the secrets; never put either in this file.
+**Both belong in public code.** The key identifies the project, not a person — it can
+only ever act as whoever is signed in, and row-level security does the rest.
+
+**Never paste the `secret` / `service_role` key.** It bypasses row-level security
+entirely, so anyone reading the page source could reach every budget. The app checks for
+it and refuses to start, but do not rely on that.
 
 ## 4. Decide about email confirmation
 
