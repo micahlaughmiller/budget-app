@@ -1003,6 +1003,7 @@ function blankSettings(){
     overspendPolicy: "carry",         // your literal rule
     creditModel: "simple",
     bufferTiers: [1, 6, 12, 24],
+    budgetLookaheadMonths: 6,
     openingTBB_c: null,               // null = seed from cash balances
     budgetStartMonth: null,           // envelopes carry from here; earlier months are history
     createdAt: todayISO()
@@ -1344,6 +1345,55 @@ function computeBudget(through){
     carry = remaining;
   }
   return {keys:keys, months:months};
+}
+
+/**
+ * The budget a month should start from: the nearest month already budgeted at or
+ * before it, falling back to the recurring plan for someone with no history yet.
+ */
+function budgetTemplateFor(k){
+  const keys = Object.keys(state.budgetMonths).filter(x => x <= k).sort();
+  for (let i = keys.length - 1; i >= 0; i--){
+    const b = state.budgetMonths[keys[i]] && state.budgetMonths[keys[i]].budgeted;
+    if (b && Object.keys(b).length) return b;
+  }
+  const incomeSet = incomeCategoryIds();
+  const out = {};
+  for (const c of state.categories){
+    if (isIncomeCategory(c, incomeSet)) continue;
+    const plan = state.recurrences
+      .filter(r => r.kind === "expense" && r.categoryId === c.id)
+      .reduce((t, r) => t + perMonth(Math.abs(r.amount_c), r.frequency, r.intervalN), 0);
+    if (plan > 0) out[c.id] = plan;
+  }
+  return out;
+}
+
+/**
+ * Keep a rolling window of months budgeted ahead, so there is always something to
+ * look at. Each new month inherits the one before it and is yours to edit; months
+ * you have already touched are never overwritten. Runs at load, so the window
+ * advances on its own as time passes.
+ */
+function ensureBudgetHorizon(){
+  const s = state.settings || blankSettings();
+  const ahead = s.budgetLookaheadMonths == null ? 6 : s.budgetLookaheadMonths;
+  if (ahead <= 0) return [];
+  const made = [];
+  let k = monthKey(s.asOfDate || todayISO());
+  for (let i = 0; i <= ahead; i++){
+    const cur = state.budgetMonths[k] && state.budgetMonths[k].budgeted;
+    if (!cur || !Object.keys(cur).length){
+      const tpl = budgetTemplateFor(shiftMonth(k, -1));
+      if (Object.keys(tpl).length){
+        state.budgetMonths[k] = {budgeted: Object.assign({}, tpl), auto: true};
+        made.push(k);
+      }
+    }
+    k = shiftMonth(k, 1);
+  }
+  for (const m of made) persistBudget(m);
+  return made;
 }
 
 function budgetParticipatingCash(){
@@ -3160,9 +3210,9 @@ const TABS = [
   {id:"accounts", label:"Accounts"},
   {id:"income",   label:"Income"},
   {id:"expenses", label:"Expenses"},
+  {id:"goals",    label:"Goals"},
   {id:"budget",   label:"Budget"},
   {id:"plan",     label:"Plan"},
-  {id:"goals",    label:"Goals"},
   {id:"txns",     label:"Transactions"},
   {id:"import",   label:"Import"},
   {id:"schedule", label:"Schedule"},
@@ -4569,10 +4619,31 @@ function paneBudget(){
   lbl.style.fontSize = "13px";
   const next = el("button", "btn sm", "Next ›");
   next.type = "button";
-  next.addEventListener("click", () => { state.budgetMonth = shiftMonth(mk, 1); render(); });
+  next.addEventListener("click", () => {
+    state.budgetMonth = shiftMonth(mk, 1);
+    ensureBudgetHorizon();                 // walking forward keeps the window filled
+    render();
+  });
   nav.appendChild(prev); nav.appendChild(lbl); nav.appendChild(next);
   head.appendChild(nav);
   pane.appendChild(head);
+
+  // how far ahead is already planned
+  const cur = monthKey((state.settings && state.settings.asOfDate) || todayISO());
+  let ready = 0, probe = cur;
+  while (ready < 36){
+    const b = state.budgetMonths[probe] && state.budgetMonths[probe].budgeted;
+    if (!b || !Object.keys(b).length) break;
+    ready++; probe = shiftMonth(probe, 1);
+  }
+  if (ready > 1){
+    const ah = el("p", "lede");
+    ah.style.marginBottom = "12px";
+    ah.textContent = ready + " months are planned ahead, through " +
+      monthLabel(shiftMonth(cur, ready - 1)) +
+      ". Each new month starts as a copy of the one before it — change anything and it stays changed.";
+    pane.appendChild(ah);
+  }
 
   const startM = state.settings && state.settings.budgetStartMonth;
   if (startM && mk < startM){
@@ -5672,6 +5743,7 @@ async function boot(){
   render();                       // paint immediately; never block first paint on a capability
   setSave("", "loading…");
   await loadAll();
+  ensureBudgetHorizon();
   render();
 }
 
