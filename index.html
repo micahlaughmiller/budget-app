@@ -177,6 +177,14 @@ button{font:inherit; color:inherit}
   display:flex; align-items:center; justify-content:center; padding:0;
 }
 .xbtn:hover{background:var(--neg-soft); color:var(--neg)}
+.cbtn{
+  appearance:none; border:0; background:none; color:var(--faint); cursor:pointer;
+  width:26px; height:26px; border-radius:4px; font-size:13px; line-height:1;
+  display:flex; align-items:center; justify-content:center; padding:0;
+}
+.cbtn:hover{background:var(--accent-soft); color:var(--accent)}
+.cbtn:focus-visible{outline:2px solid var(--focus); outline-offset:1px}
+.gc.act{display:flex; gap:2px; align-items:center; justify-content:center}
 /* the delete column now leads each row — keep it quiet until you reach for it */
 .grow > .gc.act:first-child{background:var(--surface-2); border-right:1px solid var(--line)}
 .grow.head > .gc:first-child{background:var(--surface-2)}
@@ -676,6 +684,28 @@ const FREQ = {
   ONETIME:        {label:"One Time",         perYear:0}
 };
 const FREQ_KEYS = Object.keys(FREQ);
+
+/**
+ * What a row is actually worth on a given date, once a yearly raise is applied.
+ * The raise compounds on each anniversary of the anchor, so a 3% raise anchored
+ * 9 Oct 2026 pays the old figure through 8 Oct 2027 and the new one from the 9th.
+ * Every place that posts, plans or reports an amount goes through here, or the
+ * graph and the budget would quietly disagree with each other.
+ */
+function amountOn(rec, dateISO){
+  const base = Math.abs(rec.amount_c || 0);
+  const pct = Number(rec.annualRaisePct || 0);
+  if (!pct || !base || !dateISO) return base;
+  const from = rec.raiseStart || rec.anchorDate;
+  if (!from || dateISO < from) return base;
+  // whole anniversaries elapsed — never partial, a raise lands on a date
+  const a = from.split("-").map(Number), b = dateISO.split("-").map(Number);
+  let yrs = b[0] - a[0];
+  if (b[1] < a[1] || (b[1] === a[1] && b[2] < a[2])) yrs--;
+  if (yrs <= 0) return base;
+  if (yrs > 100) yrs = 100;                      // a guard, not a policy
+  return Math.round(base * Math.pow(1 + pct / 100, yrs));
+}
 
 /** Monthly-equivalent of a recurring amount, in cents. One-time contributes 0. */
 function perMonth(cents, freq, n){
@@ -1291,11 +1321,45 @@ function incomeRowsFor(mk){
       const tx = txs.find(t => t.id === id);
       rows.push({id:id, recId:r.id, occDate:o.date, name:r.name || "(unnamed)",
                  accountId:r.accountId, categoryId:r.categoryId || "",
-                 planned_c: Math.abs(r.amount_c), received_c: tx ? tx.amount_c : 0, has: !!tx});
+                 planned_c: amountOn(r, o.date), received_c: tx ? tx.amount_c : 0, has: !!tx});
     }
   }
   rows.sort((a, b) => a.occDate.localeCompare(b.occDate));
   return rows;
+}
+
+/**
+ * One-off money that no recurring row predicts: a tax refund, a bonus, a rebate.
+ * It is stored as an ordinary uncategorised deposit, which is exactly what the
+ * budget already treats as income — so it lands in To Be Budgeted with no special
+ * case anywhere in the envelope maths.
+ */
+const EXTRA_PREFIX = "t-extra-";
+
+function extraIncomeFor(mk){
+  return (state.txMonths[mk] || []).filter(t => String(t.id).indexOf(EXTRA_PREFIX) === 0)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+function addExtraIncome(mk){
+  const list = state.txMonths[mk] || (state.txMonths[mk] = []);
+  const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+  list.push({id: EXTRA_PREFIX + uid("x"), date: mk + "-01", payee: "", categoryId: "",
+             accountId: op.id || "", amount_c: 0, memo: "One-off income", cleared: true});
+  persistMonth(mk);
+}
+
+function updateExtraIncome(mk, id, patch){
+  const list = state.txMonths[mk] || [];
+  const t = list.find(x => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch);
+  persistMonth(mk);
+}
+
+function removeExtraIncome(mk, id){
+  state.txMonths[mk] = (state.txMonths[mk] || []).filter(t => t.id !== id);
+  persistMonth(mk);
 }
 
 /** Record what actually arrived for one income occurrence. */
@@ -1330,7 +1394,7 @@ function plannedIncomeFor(k, afterISO, claims){
     for (const o of occurrences(r, {max:60, from:mStart, until:mEnd})){
       if (claims && claims.has(r.id + "|" + o.date)) continue;
       if (afterISO && o.date <= afterISO) continue;
-      sum += Math.abs(r.amount_c);
+      sum += amountOn(r, o.date);
     }
   }
   return sum;
@@ -1624,7 +1688,7 @@ function simulate(opts){
       if (r.kind === "expense" && governed(r.categoryId, occ.date)) continue;
       // …and suppress any occurrence a real transaction has already paid
       if (claims && claims.has(r.id + "|" + occ.date)) continue;
-      push(d, ai, sign * Math.abs(r.amount_c), r.categoryId);
+      push(d, ai, sign * amountOn(r, occ.date), r.categoryId);
     }
   }
 
@@ -2908,7 +2972,7 @@ function plannedOccurrences(fromISO, untilISO){
     for (const o of occurrences(r, {max:400, from:fromISO, until:untilISO})){
       out.push({recId:r.id, name:r.name, date:o.date, accountId:r.accountId,
                 categoryId:r.categoryId || "", kind:r.kind,
-                amount_c:(r.kind === "income" ? 1 : -1) * Math.abs(r.amount_c)});
+                amount_c:(r.kind === "income" ? 1 : -1) * amountOn(r, o.date)});
     }
   }
   return out;
@@ -3652,7 +3716,7 @@ function gridTable(colsIn, rows, opts){
   // The delete control is defined last but belongs first: on a wide table it would
   // otherwise sit off the right edge, so removing a row would mean scrolling to find it.
   const cols = colsIn.slice();
-  const di = cols.findIndex(c => !c.label && /^3[0-9]px$/.test(String(c.w)));
+  const di = cols.findIndex(c => c.act || (!c.label && /^3[0-9]px$/.test(String(c.w))));
   if (di > 0) cols.unshift(cols.splice(di, 1)[0]);
 
   const wrap = el("div", "gridwrap");
@@ -3771,6 +3835,28 @@ function cellDelete(onDel, disabled, title){
   if (disabled){ b.disabled = true; b.style.opacity = ".3"; b.style.cursor = "not-allowed"; }
   else b.addEventListener("click", onDel);
   c.appendChild(b);
+  return c;
+}
+
+/**
+ * Delete, and beside it duplicate. Copying a row is how you handle a figure that
+ * changes partway through: end the old row and let the copy carry the new amount,
+ * rather than editing history out from under the months already budgeted.
+ */
+function cellRowActions(onDel, onCopy, copyTitle){
+  const c = el("div", "gc act");
+  const d = el("button", "xbtn", "\u00d7");
+  d.type = "button";
+  d.title = "Delete row";
+  d.setAttribute("aria-label", "Delete row");
+  d.addEventListener("click", onDel);
+  c.appendChild(d);
+  const k = el("button", "cbtn", "\u29c9");
+  k.type = "button";
+  k.title = copyTitle || "Duplicate this row";
+  k.setAttribute("aria-label", "Duplicate row");
+  k.addEventListener("click", onCopy);
+  c.appendChild(k);
   return c;
 }
 
@@ -4441,6 +4527,14 @@ function paneFlows(kind){
       }, {disabled: !(FREQ[r.frequency] && FREQ[r.frequency].interval), placeholder:"—"})},
     {label:"Anchor date", w:"minmax(140px,.95fr)", title:"Every occurrence is computed from this date by index — never chained off the previous one, which is what caused the legacy month-end drift.",
       cell:(r) => cellInput(r, "anchorDate", "date", v => { r.anchorDate = v; persistCore("recurrences"); scheduleRender(); })},
+    {label:"Yearly raise %", w:"minmax(105px,.7fr)",
+      title:"A raise applied on each anniversary of the anchor date, compounding. Leave blank for none. 3 means 3% a year.",
+      cell:(r) => cellInput(r, "annualRaisePct", "num", (v, i) => {
+        const x = parseFloat(String(v).replace(/[%\s]/g, ""));
+        r.annualRaisePct = Number.isFinite(x) ? Math.max(-50, Math.min(50, x)) : null;
+        i.value = r.annualRaisePct == null ? "" : String(r.annualRaisePct);
+        persistCore("recurrences"); render();
+      }, {placeholder:"\u2014", step:"0.1"})},
     {label:"Ends", w:"minmax(140px,.95fr)", title:"Leave blank to continue indefinitely (the legacy 'xx').",
       cell:(r) => cellInput(r, "endDate", "date", v => { r.endDate = v || null; persistCore("recurrences"); scheduleRender(); })},
     {label:"Weekends", w:"minmax(140px,.95fr)", title:"The legacy file sent BOTH Saturday and Sunday back to Friday, contradicting its own note.",
@@ -4463,12 +4557,27 @@ function paneFlows(kind){
         c.appendChild(box);
         return c;
       }},
-    {label:"Per month", w:"minmax(95px,.65fr)", title:"Exact monthly equivalent. Reporting only — the simulator uses real dates.",
-      cell:(r) => cellReadonly(money0(perMonth(r.amount_c, r.frequency, r.intervalN)))},
-    {label:"", w:"36px", cell:(r) => cellDelete(() => {
+    {label:"Per month", w:"minmax(95px,.65fr)", title:"Exact monthly equivalent at today's amount. Reporting only — the simulator uses real dates, and a yearly raise grows this over time.",
+      cell:(r) => {
+        const asOf = (state.settings && state.settings.asOfDate) || todayISO();
+        const now = amountOn(r, asOf);
+        const c = cellReadonly(money0(perMonth(now, r.frequency, r.intervalN)));
+        if (r.annualRaisePct) c.title = "Today " + money(now) + " per occurrence, from a starting " +
+          money(Math.abs(r.amount_c)) + " and " + r.annualRaisePct + "% a year.";
+        return c;
+      }},
+    {label:"", w:"64px", act:true, cell:(r) => cellRowActions(
+      () => {
         state.recurrences = state.recurrences.filter(x => x.id !== r.id);
         persistCore("recurrences"); render();
-      })}
+      },
+      () => {
+        const copy = Object.assign({}, r, {id: uid("r"), name: (r.name || "") + " (copy)"});
+        const at = state.recurrences.indexOf(r);
+        state.recurrences.splice(at < 0 ? state.recurrences.length : at + 1, 0, copy);
+        persistCore("recurrences"); render();
+      },
+      "Duplicate this row — for when the amount changes partway through")}
   ];
 
   sec.appendChild(gridTable(cols, rows.map(r => ({item:r})), {
@@ -5280,8 +5389,10 @@ function paneBudget(){
 
   // ---------- income, at the top, where you enter what actually arrived ----------
   const irows = incomeRowsFor(mk);
+  const extras = extraIncomeFor(mk);
   const other = (state.txMonths[mk] || []).filter(t =>
     t.amount_c > 0 && !irows.some(r => r.id === t.id) &&
+    String(t.id).indexOf(EXTRA_PREFIX) !== 0 &&
     (!t.categoryId || isIncomeCategory(state.categories.find(c => c.id === t.categoryId))));
   const otherTotal = other.reduce((s, t) => s + t.amount_c, 0);
 
@@ -5291,7 +5402,8 @@ function paneBudget(){
   isec.appendChild(ih);
   isec.appendChild(el("p", "lede",
     "What you expect this month, and what has actually landed. Type the real figure into Received and it " +
-    "adds to what you have to budget below — it is not an envelope, so it never spends anything."));
+    "adds to what you have to budget below — it is not an envelope, so it never spends anything. " +
+    "Money that no recurring row predicts — a tax refund, a bonus — goes in Additional income underneath."));
 
   const ITPL = "minmax(180px,1.6fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr)";
   const iwrap = el("div", "gridwrap");
@@ -5330,6 +5442,41 @@ function paneBudget(){
     row.appendChild(sc);
     igrid.appendChild(stack(row));
   }
+  let extraTot = 0;
+  if (extras.length){
+    const eh = el("div", "grow grouphead");
+    eh.style.gridTemplateColumns = ITPL;
+    const en = el("div", "gc ro lbl");
+    en.appendChild(el("b", "", "Additional income"));
+    eh.appendChild(en);
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    igrid.appendChild(eh);
+  }
+  for (const t of extras){
+    extraTot += t.amount_c;
+    const row = el("div", "grow");
+    row.style.gridTemplateColumns = ITPL;
+    row.appendChild(cellInput({id:"xn-" + t.id, v: t.payee || ""}, "v", "text",
+      (val) => { updateExtraIncome(mk, t.id, {payee: val}); scheduleRender(); },
+      {placeholder:"Tax refund, bonus \u2026"}));
+    row.appendChild(cellInput({id:"xd-" + t.id, v: t.date}, "v", "date",
+      (val) => { updateExtraIncome(mk, t.id, {date: val || (mk + "-01")}); scheduleRender(); }));
+    row.appendChild(cellReadonly("one-off"));
+    row.appendChild(cellInput({id:"xa-" + t.id, v: t.amount_c}, "v", "money",
+      (val) => { updateExtraIncome(mk, t.id, {amount_c: Math.abs(toCents(val))}); render(); }));
+    const xc = el("div", "gc act");
+    const xb = el("button", "xbtn", "\u00d7");
+    xb.type = "button";
+    xb.title = "Remove this one-off";
+    xb.addEventListener("click", () => { removeExtraIncome(mk, t.id); render(); });
+    xc.appendChild(xb);
+    row.appendChild(xc);
+    igrid.appendChild(stack(row));
+  }
+  gotTot += extraTot;
   if (otherTotal){
     const row = el("div", "grow");
     row.style.gridTemplateColumns = ITPL;
@@ -5341,7 +5488,7 @@ function paneBudget(){
     igrid.appendChild(row);
     gotTot += otherTotal;
   }
-  if (!irows.length && !otherTotal){
+  if (!irows.length && !otherTotal && !extras.length){
     igrid.appendChild(el("div", "empty",
       "No income rows for " + monthLabel(mk) + ". Add your paychecks on the Income tab and they appear here."));
   } else {
@@ -5357,6 +5504,13 @@ function paneBudget(){
     igrid.appendChild(tot);
   }
   iwrap.appendChild(igrid);
+  const ibar = el("div", "addbar");
+  const iadd = el("button", "btn sm", "+ Add one-off income");
+  iadd.type = "button";
+  iadd.title = "A tax refund, a bonus, a rebate \u2014 money this month that no recurring row predicts.";
+  iadd.addEventListener("click", () => { addExtraIncome(mk); render(); });
+  ibar.appendChild(iadd);
+  iwrap.appendChild(ibar);
   isec.appendChild(iwrap);
   pane.appendChild(isec);
 
@@ -5711,7 +5865,7 @@ function paneSchedule(){
         cal.appendChild(dh);
       }
       const isInc = e.rec.kind === "income";
-      const amt = Math.abs(e.rec.amount_c);
+      const amt = amountOn(e.rec, e.date);
       running += isInc ? amt : -amt;
       const row = el("div", "calrow" + (isInc ? " inc" : ""));
       row.appendChild(el("span", "calname", e.rec.name || "(unnamed)"));
