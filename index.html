@@ -3024,9 +3024,36 @@ function sbInit(){
   const lib = window.supabase;
   if (!lib || !lib.createClient) return null;
   sb = lib.createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: {persistSession: true, autoRefreshToken: true}
+    // detectSessionInUrl is what turns the tokens on a confirmation link into a
+    // real session, so following the email lands you signed in rather than back
+    // at the sign-in form.
+    auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true}
   });
   return sb;
+}
+
+/** Where a confirmation or recovery link should come back to: this page. */
+function authRedirectTo(){
+  return location.origin + location.pathname;
+}
+
+/** Supabase reports a dead or expired link in the URL fragment. Show it, don't swallow it. */
+function authLinkMessage(){
+  const raw = (location.hash || "").replace(/^#/, "") || location.search.replace(/^\?/, "");
+  if (!raw) return null;
+  let p;
+  try { p = new URLSearchParams(raw); } catch (e){ return null; }
+  const err = p.get("error_description") || p.get("error");
+  if (err) return err.replace(/\+/g, " ");
+  if (p.get("type") === "signup") return "Email confirmed. Sign in below.";
+  return null;
+}
+
+/** Tokens should not linger in the address bar or the browser history. */
+function clearAuthLink(){
+  if (/access_token|refresh_token|error|type=(signup|recovery|magiclink)/.test(location.hash + location.search)){
+    try { history.replaceState(null, "", location.pathname); } catch (e){}
+  }
 }
 
 /** Every row this user owns. RLS means the query cannot return anyone else's. */
@@ -3075,7 +3102,11 @@ function authGate(message){
 
   const err = el("div", "autherr");
   err.hidden = !message;
-  if (message) err.textContent = message;
+  if (message){
+    // a confirmed email is good news, not a failure
+    if (/^Email confirmed/i.test(message)) err.className = "autherr ok";
+    err.textContent = message;
+  }
   box.appendChild(err);
 
   const field = (label, type, id, auto) => {
@@ -3116,10 +3147,14 @@ function authGate(message){
   signUp.addEventListener("click", async () => {
     busy("Creating your account…");
     try {
-      const {error} = await sb.auth.signUp({email: email.value.trim(), password: pass.value});
+      const {error} = await sb.auth.signUp({
+        email: email.value.trim(),
+        password: pass.value,
+        options: {emailRedirectTo: authRedirectTo()}     // come back here, not to the default site
+      });
       if (error) throw error;
       err.className = "autherr ok";
-      err.textContent = "Account created. If the project asks for email confirmation, click the link we sent, then sign in.";
+      err.textContent = "Check your email and follow the confirmation link — it brings you straight back here.";
       signIn.disabled = signUp.disabled = false;
     } catch (e){ fail(e); }
   });
@@ -5939,7 +5974,14 @@ async function boot(){
   setSave("", "loading…");
   await loadAll();
 
-  if (store.mode === "anon"){ authGate(null); setSave("", "signed out"); return; }
+  if (store.mode === "anon"){
+    const msg = authLinkMessage();
+    clearAuthLink();
+    authGate(msg);
+    setSave("", "signed out");
+    return;
+  }
+  clearAuthLink();                // arrived via a confirmation link and already signed in
 
   ensureBudgetHorizon();          // always some months planned ahead
 

@@ -49,7 +49,23 @@ Dashboard → **Authentication** → **Providers** → **Email**.
   but the free tier sends a limited number of emails per hour.
 - **Confirm email OFF** — sign-up works immediately. Fine for you and a few friends.
 
-## 5. Publish
+## 5. Point the confirmation link back at the app
+
+Dashboard -> **Authentication** -> **URL Configuration**.
+
+- **Site URL** -> `https://micahlaughmiller.github.io/budget-app/`
+- **Redirect URLs** -> add the same address
+
+Without this, the link in the confirmation email goes to Supabase's default
+(usually `http://localhost:3000`) and lands on nothing. The app also asks for this
+address explicitly when it creates an account, but the dashboard has to allow it —
+Supabase refuses any redirect that is not on that list.
+
+Following the link signs the person straight in. If they open it in a different
+browser from the one they signed up in, they land on the sign-in form with
+"Email confirmed" shown instead.
+
+## 6. Publish
 
 Commit and push, then enable GitHub Pages on the repo. Share the URL with your friends;
 each of them presses **Create an account** once.
