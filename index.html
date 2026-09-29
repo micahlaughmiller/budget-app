@@ -1266,7 +1266,7 @@ function bufferGoals(d){
    3a. ENVELOPE BUDGET (M4)
    remaining[p][c] = carryIn[p][c] + budgeted[p][c] + activity[p][c]
    carryIn[p][c]   = rollover(remaining[p-1][c])
-   Verified against Micah's own Max Your Budget sheet: every September row
+   Verified against a real Max Your Budget sheet: every September row
    satisfies carryIn + budgeted - actual = remaining, and Savings carries a
    NEGATIVE budgeted, which is how money moves between envelopes.
    Derived from three stored inputs only — budgeted cells, transactions and the
@@ -1276,7 +1276,7 @@ function bufferGoals(d){
 function rollover(prev, policy){
   if (policy === "carryPositiveOnly") return Math.max(0, prev);
   if (policy === "reset") return 0;
-  return prev;                                   // 'carry' — Micah's stated rule
+  return prev;                                   // 'carry' — the stated rule
 }
 
 /** Every month from the earliest data to `through`, inclusive. */

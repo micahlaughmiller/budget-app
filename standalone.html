@@ -1,4 +1,4 @@
-<title>Better Budget Template</title>
+<title>Better Budget</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -176,6 +176,14 @@ button{font:inherit; color:inherit}
   display:flex; align-items:center; justify-content:center; padding:0;
 }
 .xbtn:hover{background:var(--neg-soft); color:var(--neg)}
+.cbtn{
+  appearance:none; border:0; background:none; color:var(--faint); cursor:pointer;
+  width:26px; height:26px; border-radius:4px; font-size:13px; line-height:1;
+  display:flex; align-items:center; justify-content:center; padding:0;
+}
+.cbtn:hover{background:var(--accent-soft); color:var(--accent)}
+.cbtn:focus-visible{outline:2px solid var(--focus); outline-offset:1px}
+.gc.act{display:flex; gap:2px; align-items:center; justify-content:center}
 /* the delete column now leads each row — keep it quiet until you reach for it */
 .grow > .gc.act:first-child{background:var(--surface-2); border-right:1px solid var(--line)}
 .grow.head > .gc:first-child{background:var(--surface-2)}
@@ -244,6 +252,24 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .sevtag.impossible{background:var(--neg-soft); color:var(--neg)}
 .fixtext{font-size:12.5px; color:var(--muted); flex:1 1 260px; min-width:0}
 .fixbtns{display:flex; gap:7px; flex-wrap:wrap; margin-top:9px}
+
+.startgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; margin-bottom:10px}
+.startgrid .fld input{max-width:none; width:100%}
+/* ---------- sign-in gate ---------- */
+.authbox{
+  max-width:400px; margin:56px auto; padding:26px;
+  border:1px solid var(--line); border-radius:var(--r); background:var(--surface); box-shadow:var(--shadow);
+}
+.authbox h2{font-size:22px; margin-bottom:6px}
+.authsub{font-size:13px; color:var(--muted); margin:0 0 18px}
+.authfoot{font-size:11.5px; color:var(--faint); margin:16px 0 0}
+.authbox .fld input{max-width:none; width:100%}
+.autherr{
+  font-size:12.5px; padding:9px 11px; border-radius:var(--r); margin-bottom:14px;
+  background:var(--neg-soft); color:var(--neg); border:1px solid var(--neg);
+}
+.autherr.busy{background:var(--surface-2); color:var(--muted); border-color:var(--line-2)}
+.autherr.ok{background:var(--accent-soft); color:var(--accent); border-color:var(--accent)}
 
 /* ---------- what changed ---------- */
 .changed{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:14px}
@@ -335,9 +361,48 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .chart .endval{font-family:var(--font-mono); font-size:10.5px; opacity:.8}
 .chart .lowdot{fill:var(--warn); stroke:var(--surface); stroke-width:1.6}
 .chart .callout{font-family:var(--font-ui); font-size:10.5px; fill:var(--warn); font-weight:600}
-.chart .flagline{stroke:var(--muted); stroke-width:1; stroke-dasharray:2 2}
-.chart .flagdot{fill:var(--c-net); stroke:var(--surface); stroke-width:1.4}
-.chart .flaglab{font-family:var(--font-ui); font-size:10px; fill:var(--ink-2)}
+.chart .flagline{stroke:var(--muted); stroke-width:1; stroke-dasharray:2 2; opacity:.55}
+.chart .mstone{fill:var(--c-net); stroke:var(--surface); stroke-width:1.4}
+.chart .mnum{font-family:var(--font-ui); font-size:8px; font-weight:700; fill:var(--surface)}
+
+/* the overage dialog */
+.scrim{position:fixed; inset:0; background:rgba(0,0,0,.42); z-index:60;
+  display:flex; align-items:center; justify-content:center; padding:18px}
+.modal{background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  box-shadow:0 18px 50px rgba(0,0,0,.28); width:min(560px,100%); max-height:88vh; overflow:auto;
+  padding:18px 20px}
+.modal h2{font-family:var(--font-ui); font-size:16px; margin:0 0 4px}
+.modal .lede{margin:0 0 14px}
+.opt{border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin:0 0 9px;
+  background:var(--surface-2)}
+.opt.best{border-color:var(--accent); background:var(--accent-soft)}
+.opt .oh{display:flex; gap:8px; align-items:center; margin:0 0 5px}
+.opt .ot{font-family:var(--font-ui); font-size:13px; font-weight:700; color:var(--ink)}
+.opt .od{font-family:var(--font-ui); font-size:12px; color:var(--ink-2); margin:0 0 8px}
+.opt ul{margin:0 0 8px; padding-left:16px}
+.opt li{font-family:var(--font-ui); font-size:12px; color:var(--ink-2); margin:2px 0}
+.opt .btn{margin:0 6px 0 0}
+.modal .foot{display:flex; gap:8px; justify-content:flex-end; margin-top:12px}
+
+.planbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+  border:1px solid var(--line); border-radius:10px; background:var(--surface-2);
+  padding:9px 12px; margin:0 0 12px}
+.planbar .lede{margin:0; font-size:12px}
+.planbar .chip{font-size:11.5px}
+
+/* the graph and the milestone key sit side by side; the key stacks under it when narrow */
+.chartrow{display:grid; grid-template-columns:minmax(0,1fr) 250px; gap:14px; align-items:start}
+@media (max-width:900px){ .chartrow{grid-template-columns:minmax(0,1fr)} }
+.mkey{border:1px solid var(--line); border-radius:10px; background:var(--surface-2); padding:10px 11px}
+.mkey h3{font-family:var(--font-ui); font-size:11px; font-weight:700; letter-spacing:.04em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 8px}
+.mkey ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px}
+.mkey li{display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:start}
+.mkey .pip{width:18px; height:18px; display:block; flex:none}
+.mkey .mdate{font-family:var(--font-mono); font-size:11px; color:var(--ink-2); display:block}
+.mkey .mwhat{font-family:var(--font-ui); font-size:12px; font-weight:600; color:var(--ink); display:block;
+  overflow-wrap:anywhere}
+.mkey .none{font-family:var(--font-ui); font-size:12px; color:var(--muted); margin:0}
 
 :root{
   --c-net:#0F766E; --c-cash:#2563A8; --c-liab:#A63D2F; --c-inv:#6B4FA8; --c-save:#3F7A2E;
@@ -482,7 +547,7 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 
 <div class="topbar">
   <div class="topbar-in">
-    <div class="mark">Better<span>·</span>Budget <span style="font-family:var(--font-ui);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)">template</span></div>
+    <div class="mark">Better<span>·</span>Budget</div>
     <div class="topbar-sp"></div>
     <div class="savechip"><span class="dot" id="saveDot"></span><span id="saveTxt">starting…</span></div>
     <button class="btn sm ghost" id="themeBtn" title="Toggle light / dark">Theme</button>
@@ -498,10 +563,9 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
   <div id="panes" role="tabpanel"></div>
 
   <div class="foot">
-    <b>A blank Better Budget.</b> One checking account and a starter set of categories, everything else
-    empty and waiting for your numbers. Work through Setup in order: income, expenses, the savings buffer,
-    debts and investments, then goals. The Dashboard and Plan tabs light up as soon as there is enough
-    to project.
+    <b>Signed-in edition.</b> Each account holds its own budget in Supabase, kept apart by row-level
+    security in the database itself — not by anything this page does. Your data follows you to any
+    device you sign in on.
     Money is stored in integer cents; dates as <code>YYYY-MM-DD</code>. Every occurrence is computed from its
     anchor by index rather than chained off the previous date, which is what stops month-end drift.
     Monthly equivalents use exact annual rates (weekly × 52/12, not the legacy workbook's × 30/7) and are
@@ -619,6 +683,28 @@ const FREQ = {
   ONETIME:        {label:"One Time",         perYear:0}
 };
 const FREQ_KEYS = Object.keys(FREQ);
+
+/**
+ * What a row is actually worth on a given date, once a yearly raise is applied.
+ * The raise compounds on each anniversary of the anchor, so a 3% raise anchored
+ * 9 Oct 2026 pays the old figure through 8 Oct 2027 and the new one from the 9th.
+ * Every place that posts, plans or reports an amount goes through here, or the
+ * graph and the budget would quietly disagree with each other.
+ */
+function amountOn(rec, dateISO){
+  const base = Math.abs(rec.amount_c || 0);
+  const pct = Number(rec.annualRaisePct || 0);
+  if (!pct || !base || !dateISO) return base;
+  const from = rec.raiseStart || rec.anchorDate;
+  if (!from || dateISO < from) return base;
+  // whole anniversaries elapsed — never partial, a raise lands on a date
+  const a = from.split("-").map(Number), b = dateISO.split("-").map(Number);
+  let yrs = b[0] - a[0];
+  if (b[1] < a[1] || (b[1] === a[1] && b[2] < a[2])) yrs--;
+  if (yrs <= 0) return base;
+  if (yrs > 100) yrs = 100;                      // a guard, not a policy
+  return Math.round(base * Math.pow(1 + pct / 100, yrs));
+}
 
 /** Monthly-equivalent of a recurring amount, in cents. One-time contributes 0. */
 function perMonth(cents, freq, n){
@@ -1003,9 +1089,10 @@ function blankSettings(){
     overspendPolicy: "carry",         // your literal rule
     creditModel: "simple",
     bufferTiers: [1, 6, 12, 24],
-    budgetLookaheadMonths: 6,
+    budgetLookaheadMonths: 6,         // months kept budgeted ahead of today
     openingTBB_c: null,               // null = seed from cash balances
     budgetStartMonth: null,           // envelopes carry from here; earlier months are history
+    baseline: null,                   // the plan you locked in at setup, to measure drift against
     createdAt: todayISO()
   };
 }
@@ -1178,7 +1265,7 @@ function bufferGoals(d){
    3a. ENVELOPE BUDGET (M4)
    remaining[p][c] = carryIn[p][c] + budgeted[p][c] + activity[p][c]
    carryIn[p][c]   = rollover(remaining[p-1][c])
-   Verified against Micah's own Max Your Budget sheet: every September row
+   Verified against a real Max Your Budget sheet: every September row
    satisfies carryIn + budgeted - actual = remaining, and Savings carries a
    NEGATIVE budgeted, which is how money moves between envelopes.
    Derived from three stored inputs only — budgeted cells, transactions and the
@@ -1188,7 +1275,7 @@ function bufferGoals(d){
 function rollover(prev, policy){
   if (policy === "carryPositiveOnly") return Math.max(0, prev);
   if (policy === "reset") return 0;
-  return prev;                                   // 'carry' — Micah's stated rule
+  return prev;                                   // 'carry' — the stated rule
 }
 
 /** Every month from the earliest data to `through`, inclusive. */
@@ -1233,11 +1320,45 @@ function incomeRowsFor(mk){
       const tx = txs.find(t => t.id === id);
       rows.push({id:id, recId:r.id, occDate:o.date, name:r.name || "(unnamed)",
                  accountId:r.accountId, categoryId:r.categoryId || "",
-                 planned_c: Math.abs(r.amount_c), received_c: tx ? tx.amount_c : 0, has: !!tx});
+                 planned_c: amountOn(r, o.date), received_c: tx ? tx.amount_c : 0, has: !!tx});
     }
   }
   rows.sort((a, b) => a.occDate.localeCompare(b.occDate));
   return rows;
+}
+
+/**
+ * One-off money that no recurring row predicts: a tax refund, a bonus, a rebate.
+ * It is stored as an ordinary uncategorised deposit, which is exactly what the
+ * budget already treats as income — so it lands in To Be Budgeted with no special
+ * case anywhere in the envelope maths.
+ */
+const EXTRA_PREFIX = "t-extra-";
+
+function extraIncomeFor(mk){
+  return (state.txMonths[mk] || []).filter(t => String(t.id).indexOf(EXTRA_PREFIX) === 0)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+function addExtraIncome(mk){
+  const list = state.txMonths[mk] || (state.txMonths[mk] = []);
+  const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+  list.push({id: EXTRA_PREFIX + uid("x"), date: mk + "-01", payee: "", categoryId: "",
+             accountId: op.id || "", amount_c: 0, memo: "One-off income", cleared: true});
+  persistMonth(mk);
+}
+
+function updateExtraIncome(mk, id, patch){
+  const list = state.txMonths[mk] || [];
+  const t = list.find(x => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch);
+  persistMonth(mk);
+}
+
+function removeExtraIncome(mk, id){
+  state.txMonths[mk] = (state.txMonths[mk] || []).filter(t => t.id !== id);
+  persistMonth(mk);
 }
 
 /** Record what actually arrived for one income occurrence. */
@@ -1272,7 +1393,7 @@ function plannedIncomeFor(k, afterISO, claims){
     for (const o of occurrences(r, {max:60, from:mStart, until:mEnd})){
       if (claims && claims.has(r.id + "|" + o.date)) continue;
       if (afterISO && o.date <= afterISO) continue;
-      sum += Math.abs(r.amount_c);
+      sum += amountOn(r, o.date);
     }
   }
   return sum;
@@ -1566,7 +1687,7 @@ function simulate(opts){
       if (r.kind === "expense" && governed(r.categoryId, occ.date)) continue;
       // …and suppress any occurrence a real transaction has already paid
       if (claims && claims.has(r.id + "|" + occ.date)) continue;
-      push(d, ai, sign * Math.abs(r.amount_c), r.categoryId);
+      push(d, ai, sign * amountOn(r, occ.date), r.categoryId);
     }
   }
 
@@ -2541,19 +2662,20 @@ function chartSVG(sim){
          '" class="callout" text-anchor="' + (lowRight ? "start" : "end") + '">Tightest day: ' +
          esc(shortDate(sim.low.date)) + ' · ' + esc(money0(sim.low.v)) + '</text>';
 
-  // --- milestone flags ---
-  const flags = sim.events.slice(0, 6);
-  let band = 0;
-  for (const ev of flags){
+  // --- milestones: a numbered diamond on the curve, named in the legend beside it ---
+  const flags = (sim.events || []).slice(0, 12);
+  flags.forEach((ev, i) => {
     const ex = x(ev.d), ey = y(sim.net[ev.d]);
-    const ty = Math.max(mt + 14, ey - 16 - band * 15); band = (band + 1) % 3;
-    svg += '<line x1="' + ex.toFixed(1) + '" y1="' + ey.toFixed(1) + '" x2="' + ex.toFixed(1) + '" y2="' + ty.toFixed(1) + '" class="flagline"/>';
-    svg += '<circle cx="' + ex.toFixed(1) + '" cy="' + ey.toFixed(1) + '" r="3" class="flagdot"/>';
-    const right = ex < ml + iw * 0.7;
-    svg += '<text x="' + (right ? ex + 6 : ex - 6).toFixed(1) + '" y="' + ty.toFixed(1) +
-           '" class="flaglab" text-anchor="' + (right ? "start" : "end") + '">' +
-           esc(ev.text) + ' · ' + esc(shortDate(ev.date)) + '</text>';
-  }
+    const r = 6.5;
+    svg += '<line x1="' + ex.toFixed(1) + '" y1="' + (mt + ih).toFixed(1) +
+           '" x2="' + ex.toFixed(1) + '" y2="' + ey.toFixed(1) + '" class="flagline"/>';
+    svg += '<path d="M' + ex.toFixed(1) + ' ' + (ey - r).toFixed(1) +
+           'L' + (ex + r).toFixed(1) + ' ' + ey.toFixed(1) +
+           'L' + ex.toFixed(1) + ' ' + (ey + r).toFixed(1) +
+           'L' + (ex - r).toFixed(1) + ' ' + ey.toFixed(1) + 'Z" class="mstone"/>';
+    svg += '<text x="' + ex.toFixed(1) + '" y="' + (ey + 0.5).toFixed(1) +
+           '" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text>';
+  });
 
   svg += '</svg>';
   return svg;
@@ -2849,7 +2971,7 @@ function plannedOccurrences(fromISO, untilISO){
     for (const o of occurrences(r, {max:400, from:fromISO, until:untilISO})){
       out.push({recId:r.id, name:r.name, date:o.date, accountId:r.accountId,
                 categoryId:r.categoryId || "", kind:r.kind,
-                amount_c:(r.kind === "income" ? 1 : -1) * Math.abs(r.amount_c)});
+                amount_c:(r.kind === "income" ? 1 : -1) * amountOn(r, o.date)});
     }
   }
   return out;
@@ -2968,6 +3090,195 @@ function predictCategory(payee){
 }
 
 /* ============================================================
+   3f. SUPABASE — accounts, and one budget per signed-in person
+   ============================================================ */
+
+/* ---------------------------------------------------------------
+   Fill these in from your Supabase dashboard.
+
+     SUPABASE_URL  Project Settings -> Data API -> Project URL
+                   (older dashboards: Project Settings -> API)
+
+     SUPABASE_KEY  Project Settings -> API Keys -> publishable
+                   starts "sb_publishable_". Supabase used to call this
+                   the "anon public" key; if your project still shows a
+                   Legacy API keys tab, that key (starting "eyJ") works
+                   exactly the same.
+
+   Both belong in public code. The key identifies the project, never a
+   person: it can only ever act as whoever is signed in, and Row Level
+   Security in Postgres is what separates one budget from another.
+   NEVER put the "secret" / "service_role" key here — it bypasses all of it.
+   --------------------------------------------------------------- */
+const SUPABASE_URL = "PASTE_YOUR_PROJECT_URL_HERE";
+const SUPABASE_KEY = "PASTE_YOUR_PUBLISHABLE_KEY_HERE";
+
+const cloudConfigured = () =>
+  /^https:\/\/[^\s]+\.supabase\.(co|in)\/?$/.test(SUPABASE_URL) &&
+  /^(sb_publishable_|eyJ)/.test(SUPABASE_KEY);
+
+let sb = null, sbUser = null;
+
+function sbInit(){
+  if (/^sb_secret_/.test(SUPABASE_KEY) || /service_role/.test(SUPABASE_KEY)){
+    // A secret key in client code would let anyone read every budget.
+    alert("That looks like your SECRET Supabase key. Use the publishable key instead — " +
+          "the secret one bypasses row-level security and must never be published.");
+    return null;
+  }
+  if (sb || !cloudConfigured()) return sb;
+  const lib = window.supabase;
+  if (!lib || !lib.createClient) return null;
+  sb = lib.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    // detectSessionInUrl is what turns the tokens on a confirmation link into a
+    // real session, so following the email lands you signed in rather than back
+    // at the sign-in form.
+    auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true}
+  });
+  return sb;
+}
+
+/** Where a confirmation or recovery link should come back to: this page. */
+function authRedirectTo(){
+  return location.origin + location.pathname;
+}
+
+/** Supabase reports a dead or expired link in the URL fragment. Show it, don't swallow it. */
+function authLinkMessage(){
+  const raw = (location.hash || "").replace(/^#/, "") || location.search.replace(/^\?/, "");
+  if (!raw) return null;
+  let p;
+  try { p = new URLSearchParams(raw); } catch (e){ return null; }
+  const err = p.get("error_description") || p.get("error");
+  if (err) return err.replace(/\+/g, " ");
+  if (p.get("type") === "signup") return "Email confirmed. Sign in below.";
+  return null;
+}
+
+/** Tokens should not linger in the address bar or the browser history. */
+function clearAuthLink(){
+  if (/access_token|refresh_token|error|type=(signup|recovery|magiclink)/.test(location.hash + location.search)){
+    try { history.replaceState(null, "", location.pathname); } catch (e){}
+  }
+}
+
+/** Every row this user owns. RLS means the query cannot return anyone else's. */
+async function sbLoadAll(){
+  const {data, error} = await sb.from("documents").select("path,data");
+  if (error) throw error;
+  for (const row of (data || [])){
+    const parts = String(row.path).split("/");
+    const coll = parts[0], id = parts[1];
+    const d = row.data || {};
+    if (coll === "core"){
+      if (id === "settings")         state.settings    = d.settings || blankSettings();
+      else if (id === "accounts")    state.accounts    = d.items || [];
+      else if (id === "categories")  state.categories  = d.items || [];
+      else if (id === "recurrences") state.recurrences = d.items || [];
+      else if (id === "goals")       state.goals       = d.items || [];
+    } else if (coll === "txns"){
+      state.txMonths[id] = d.items || [];
+    } else if (coll === "budget"){
+      state.budgetMonths[id] = {budgeted: d.budgeted || {}};
+    }
+  }
+  return (data || []).length;
+}
+
+async function sbWrite(path, body){
+  const {error} = await sb.from("documents")
+    .upsert({user_id: sbUser.id, path: path, data: body}, {onConflict: "user_id,path"});
+  if (error) throw error;
+}
+
+/* ---------- the sign-in gate ---------- */
+
+function authGate(message){
+  const host = document.getElementById("panes");
+  for (const id of ["nav", "strip", "stripnote"]){
+    const n = document.getElementById(id);
+    if (n) n.hidden = true;
+  }
+  host.textContent = "";
+
+  const box = el("div", "authbox");
+  box.appendChild(el("h2", "", "Better Budget"));
+  box.appendChild(el("p", "authsub",
+    "Sign in to reach your budget. Everyone who signs up gets their own — nobody can see anyone else's."));
+
+  const err = el("div", "autherr");
+  err.hidden = !message;
+  if (message){
+    // a confirmed email is good news, not a failure
+    if (/^Email confirmed/i.test(message)) err.className = "autherr ok";
+    err.textContent = message;
+  }
+  box.appendChild(err);
+
+  const field = (label, type, id, auto) => {
+    const f = el("div", "fld");
+    f.appendChild(el("label", "", label));
+    const i = el("input");
+    i.type = type; i.id = id; i.autocomplete = auto;
+    f.appendChild(i);
+    box.appendChild(f);
+    return i;
+  };
+  const email = field("Email", "email", "auth-email", "username");
+  const pass  = field("Password", "password", "auth-pass", "current-password");
+
+  const tools = el("div", "tools");
+  const signIn = el("button", "btn primary", "Sign in");
+  const signUp = el("button", "btn", "Create an account");
+  signIn.type = "button"; signUp.type = "button";
+
+  const busy = (what) => {
+    signIn.disabled = signUp.disabled = true;
+    err.hidden = false; err.className = "autherr busy"; err.textContent = what;
+  };
+  const fail = (e) => {
+    err.hidden = false; err.className = "autherr";
+    err.textContent = (e && e.message) ? e.message : String(e);
+    signIn.disabled = signUp.disabled = false;
+  };
+
+  signIn.addEventListener("click", async () => {
+    busy("Signing in…");
+    try {
+      const {error} = await sb.auth.signInWithPassword({email: email.value.trim(), password: pass.value});
+      if (error) throw error;
+      await boot();
+    } catch (e){ fail(e); }
+  });
+  signUp.addEventListener("click", async () => {
+    busy("Creating your account…");
+    try {
+      const {error} = await sb.auth.signUp({
+        email: email.value.trim(),
+        password: pass.value,
+        options: {emailRedirectTo: authRedirectTo()}     // come back here, not to the default site
+      });
+      if (error) throw error;
+      err.className = "autherr ok";
+      err.textContent = "Check your email and follow the confirmation link — it brings you straight back here.";
+      signIn.disabled = signUp.disabled = false;
+    } catch (e){ fail(e); }
+  });
+  tools.appendChild(signIn); tools.appendChild(signUp);
+  box.appendChild(tools);
+  pass.addEventListener("keydown", (e) => { if (e.key === "Enter") signIn.click(); });
+
+  box.appendChild(el("p", "authfoot",
+    "Your budget lives in your own account and is not shared. Passwords are reset from the Supabase dashboard."));
+  host.appendChild(box);
+}
+
+async function signOut(){
+  try { await sb.auth.signOut(); } catch (e){}
+  location.reload();
+}
+
+/* ============================================================
    4. PERSISTENCE — artifact db, with a localStorage fallback
    ============================================================ */
 
@@ -3010,6 +3321,11 @@ async function flushWrites(){
     while (store.queue.size){
       const [path, body] = store.queue.entries().next().value;
       store.queue.delete(path);
+      if (store.mode === "supabase"){
+        try { await sbWrite(path, body); }
+        catch (e){ reportWriteFailure(e); failed = true; }
+        continue;
+      }
       if (store.mode !== "db" || !store.db){ saveLocalMirror(); continue; }
       try {
         await store.db.doc(path).set(body);
@@ -3086,6 +3402,19 @@ function persistBudget(key){
 }
 
 async function loadAll(){
+  // 0. Supabase, when configured: only the signed-in user's own rows
+  if (cloudConfigured() && sbInit()){
+    const sess = await sb.auth.getSession();
+    const session = sess && sess.data ? sess.data.session : null;
+    if (!session){ store.mode = "anon"; return; }
+    sbUser = session.user;
+    store.mode = "supabase";
+    const n = await sbLoadAll();
+    if (!n) await seedFirstRun();
+    setSave("ok", "saved to your account");
+    return;
+  }
+
   // 1. try the artifact database
   let db = null;
   try { db = await window.claude?.use?.("db"); } catch (e){ db = null; }
@@ -3386,7 +3715,7 @@ function gridTable(colsIn, rows, opts){
   // The delete control is defined last but belongs first: on a wide table it would
   // otherwise sit off the right edge, so removing a row would mean scrolling to find it.
   const cols = colsIn.slice();
-  const di = cols.findIndex(c => !c.label && /^3[0-9]px$/.test(String(c.w)));
+  const di = cols.findIndex(c => c.act || (!c.label && /^3[0-9]px$/.test(String(c.w))));
   if (di > 0) cols.unshift(cols.splice(di, 1)[0]);
 
   const wrap = el("div", "gridwrap");
@@ -3508,6 +3837,28 @@ function cellDelete(onDel, disabled, title){
   return c;
 }
 
+/**
+ * Delete, and beside it duplicate. Copying a row is how you handle a figure that
+ * changes partway through: end the old row and let the copy carry the new amount,
+ * rather than editing history out from under the months already budgeted.
+ */
+function cellRowActions(onDel, onCopy, copyTitle){
+  const c = el("div", "gc act");
+  const d = el("button", "xbtn", "\u00d7");
+  d.type = "button";
+  d.title = "Delete row";
+  d.setAttribute("aria-label", "Delete row");
+  d.addEventListener("click", onDel);
+  c.appendChild(d);
+  const k = el("button", "cbtn", "\u29c9");
+  k.type = "button";
+  k.title = copyTitle || "Duplicate this row";
+  k.setAttribute("aria-label", "Duplicate row");
+  k.addEventListener("click", onCopy);
+  c.appendChild(k);
+  return c;
+}
+
 /* ---------- panes ---------- */
 
 /**
@@ -3558,6 +3909,129 @@ function changeStrip(R){
   return box;
 }
 
+/** The numbered diamonds on the curve, spelled out beside it: date, then what happens. */
+/* ---------- the original plan ---------- */
+
+/**
+ * Once the setup is confirmed the plan is worth freezing, because every later change
+ * is only meaningful against something. It lives in settings so it follows the file
+ * into every backend and out through the export.
+ */
+function captureBaseline(R){
+  const sim = R.sim;
+  const b = {savedAt: todayISO(), asOfDate: state.settings.asOfDate, goals: {},
+             low_c: sim.low.v, lowDate: sim.low.date, netEnd_c: sim.net[sim.nDays], debtFree: null};
+  for (const g of (R.goals || [])){
+    const a = sim.achieved[g.id];
+    b.goals[g.id] = {name: g.name, date: a ? a.date : null, target_c: g.target_c};
+  }
+  const df = (sim.events || []).find(e => e.text === "Debt free");
+  b.debtFree = df ? df.date : null;
+  state.settings.baseline = b;
+  persistCore("settings");
+}
+
+/** What has moved since the plan was locked. Returns null when there is nothing to say. */
+function baselineDrift(R){
+  const b = state.settings.baseline;
+  if (!b || !b.goals) return null;
+  const sim = R.sim, items = [];
+  for (const g of (R.goals || [])){
+    const was = b.goals[g.id];
+    const a = sim.achieved[g.id];
+    const now = a ? a.date : null;
+    if (!was){
+      items.push({txt: g.name + " added since" + (now ? " · " + shortDate(now) : ""), good: null});
+      continue;
+    }
+    if (was.date && now){
+      const dd = diffDays(was.date, now);
+      if (!dd) continue;
+      items.push({txt: g.name + " " + Math.abs(dd) + " day" + (Math.abs(dd) === 1 ? "" : "s") +
+                       (dd > 0 ? " later" : " earlier") + " than planned", good: dd < 0});
+    } else if (now && !was.date){
+      items.push({txt: g.name + " now reachable · " + shortDate(now), good: true});
+    } else if (!now && was.date){
+      items.push({txt: g.name + " has fallen out of the horizon", good: false});
+    }
+  }
+  for (const id of Object.keys(b.goals)){
+    if (!(R.goals || []).some(g => g.id === id)) items.push({txt: b.goals[id].name + " removed", good: null});
+  }
+  if (b.low_c != null && b.low_c !== sim.low.v){
+    const dd = sim.low.v - b.low_c;
+    items.push({txt: "lowest cash " + (dd > 0 ? "+" : "") + money0(dd) + " vs plan", good: dd > 0});
+  }
+  return {baseline: b, items: items};
+}
+
+/** The header control plus, once locked, the drift strip. */
+function baselineSection(R){
+  const wrap = el("div");
+  const d = baselineDrift(R);
+  const bar = el("div", "planbar");
+
+  if (!d){
+    bar.appendChild(el("span", "clabel", "Original plan"));
+    bar.appendChild(el("span", "lede",
+      "Lock this projection in once your setup is right and every change after it is measured against it."));
+    const lock = el("button", "btn sm primary", "Lock this as my original plan");
+    lock.type = "button";
+    lock.addEventListener("click", () => { captureBaseline(R); render(); });
+    bar.appendChild(lock);
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  bar.appendChild(el("span", "clabel", "Original plan · locked " + shortDate(d.baseline.savedAt)));
+  if (!d.items.length){
+    bar.appendChild(el("span", "chip good", "still exactly on plan"));
+  } else {
+    for (const i of d.items){
+      const c = el("span", "chip " + (i.good === null ? "" : (i.good ? "good" : "bad")));
+      c.textContent = i.txt;
+      bar.appendChild(c);
+    }
+  }
+  bar.appendChild(el("div", "sp"));
+  const re = el("button", "btn sm", "Re-lock to today");
+  re.type = "button";
+  re.title = "Replace the original plan with the projection as it stands now.";
+  re.addEventListener("click", () => {
+    if (!confirm("Replace your original plan with today's projection? The old one is not kept.")) return;
+    captureBaseline(R); render();
+  });
+  bar.appendChild(re);
+  wrap.appendChild(bar);
+  return wrap;
+}
+
+function milestoneKey(sim){
+  const wrap = el("div", "mkey");
+  wrap.appendChild(el("h3", "", "Milestones"));
+  const evs = (sim.events || []).slice(0, 12);
+  if (!evs.length){
+    wrap.appendChild(el("p", "none", "No goal is reached inside the horizon yet."));
+    return wrap;
+  }
+  const ol = el("ol");
+  evs.forEach((ev, i) => {
+    const li = el("li");
+    const pip = el("span", "pip");
+    pip.innerHTML = '<svg viewBox="0 0 18 18" class="chart" aria-hidden="true">' +
+      '<path d="M9 2L16 9L9 16L2 9Z" class="mstone"/>' +
+      '<text x="9" y="9.5" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text></svg>';
+    li.appendChild(pip);
+    const txt = el("div");
+    txt.appendChild(el("span", "mdate", longDate(ev.date)));
+    txt.appendChild(el("span", "mwhat", ev.text));
+    li.appendChild(txt);
+    ol.appendChild(li);
+  });
+  wrap.appendChild(ol);
+  return wrap;
+}
+
 function paneDashboard(){
   const pane = el("div");
   const d = derive();
@@ -3578,6 +4052,7 @@ function paneDashboard(){
   const ms = t0 ? ((typeof performance !== "undefined" ? performance.now() : 0) - t0) : 0;
 
   const chg = changeStrip(R); if (chg) pane.appendChild(chg);
+  pane.appendChild(baselineSection(R));
 
   // A goal with no account behind it is money parked in checking earning nothing.
   // It is easy to create by accident, because the account dropdown defaults to none.
@@ -3697,9 +4172,12 @@ function paneDashboard(){
     : "minimum payments only — no goals to fund"));
   sec.appendChild(h);
 
+  const row = el("div", "chartrow");
   const box = el("div", "chartbox");
   box.innerHTML = chartSVG(sim);
-  sec.appendChild(box);
+  row.appendChild(box);
+  row.appendChild(milestoneKey(sim));
+  sec.appendChild(row);
 
   const legend = el("div", "legend");
   const items = [
@@ -3810,9 +4288,69 @@ function paneSetup(){
   return pane;
 }
 
+/** The three numbers everything else is measured from. They belong beside the
+ *  balances they describe, not buried in a settings tab. */
+function startingPointSection(){
+  const s = state.settings || blankSettings();
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Starting point"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Where the projection begins. Balances below are taken to be true as of this date, " +
+    "and the floor is the line your cash is never planned to fall through."));
+
+  const row = el("div", "startgrid");
+
+  const fld = (label, hint, build) => {
+    const f = el("div", "fld");
+    f.style.margin = "0";
+    f.appendChild(el("label", "", label));
+    f.appendChild(build());
+    f.appendChild(el("div", "hint", hint));
+    row.appendChild(f);
+  };
+
+  fld("Balances as of", "Anything dated on or before this is already inside the balances.", () => {
+    const i = el("input"); i.type = "date"; i.id = "set-asof";
+    i.value = s.asOfDate || todayISO();
+    i.addEventListener("change", () => { s.asOfDate = i.value; persistCore("settings"); render(); });
+    return i;
+  });
+
+  fld("Operating floor", "A hard guard the plan may never dip below.", () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-floor";
+    i.value = fromCents(s.operatingFloor_c || 0);
+    i.addEventListener("change", () => {
+      s.operatingFloor_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.operatingFloor_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  fld("Buffer already saved", "Buffer money sitting in the operating account. Added to the floor so it is never spent.", () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-bufheld";
+    i.value = fromCents(s.bufferHeld_c || 0);
+    i.addEventListener("change", () => {
+      s.bufferHeld_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.bufferHeld_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  sec.appendChild(row);
+  sec.appendChild(el("p", "hint",
+    "Effective floor: " + money((s.operatingFloor_c || 0) + (s.bufferHeld_c || 0)) +
+    ", plus whatever your sinking funds hold."));
+  return sec;
+}
+
 function paneAccounts(){
   const d = derive();
   const pane = el("div");
+  pane.appendChild(startingPointSection());
   const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
 
   const sec = el("div", "sec");
@@ -3988,6 +4526,14 @@ function paneFlows(kind){
       }, {disabled: !(FREQ[r.frequency] && FREQ[r.frequency].interval), placeholder:"—"})},
     {label:"Anchor date", w:"minmax(140px,.95fr)", title:"Every occurrence is computed from this date by index — never chained off the previous one, which is what caused the legacy month-end drift.",
       cell:(r) => cellInput(r, "anchorDate", "date", v => { r.anchorDate = v; persistCore("recurrences"); scheduleRender(); })},
+    {label:"Yearly raise %", w:"minmax(105px,.7fr)",
+      title:"A raise applied on each anniversary of the anchor date, compounding. Leave blank for none. 3 means 3% a year.",
+      cell:(r) => cellInput(r, "annualRaisePct", "num", (v, i) => {
+        const x = parseFloat(String(v).replace(/[%\s]/g, ""));
+        r.annualRaisePct = Number.isFinite(x) ? Math.max(-50, Math.min(50, x)) : null;
+        i.value = r.annualRaisePct == null ? "" : String(r.annualRaisePct);
+        persistCore("recurrences"); render();
+      }, {placeholder:"\u2014", step:"0.1"})},
     {label:"Ends", w:"minmax(140px,.95fr)", title:"Leave blank to continue indefinitely (the legacy 'xx').",
       cell:(r) => cellInput(r, "endDate", "date", v => { r.endDate = v || null; persistCore("recurrences"); scheduleRender(); })},
     {label:"Weekends", w:"minmax(140px,.95fr)", title:"The legacy file sent BOTH Saturday and Sunday back to Friday, contradicting its own note.",
@@ -4010,12 +4556,27 @@ function paneFlows(kind){
         c.appendChild(box);
         return c;
       }},
-    {label:"Per month", w:"minmax(95px,.65fr)", title:"Exact monthly equivalent. Reporting only — the simulator uses real dates.",
-      cell:(r) => cellReadonly(money0(perMonth(r.amount_c, r.frequency, r.intervalN)))},
-    {label:"", w:"36px", cell:(r) => cellDelete(() => {
+    {label:"Per month", w:"minmax(95px,.65fr)", title:"Exact monthly equivalent at today's amount. Reporting only — the simulator uses real dates, and a yearly raise grows this over time.",
+      cell:(r) => {
+        const asOf = (state.settings && state.settings.asOfDate) || todayISO();
+        const now = amountOn(r, asOf);
+        const c = cellReadonly(money0(perMonth(now, r.frequency, r.intervalN)));
+        if (r.annualRaisePct) c.title = "Today " + money(now) + " per occurrence, from a starting " +
+          money(Math.abs(r.amount_c)) + " and " + r.annualRaisePct + "% a year.";
+        return c;
+      }},
+    {label:"", w:"64px", act:true, cell:(r) => cellRowActions(
+      () => {
         state.recurrences = state.recurrences.filter(x => x.id !== r.id);
         persistCore("recurrences"); render();
-      })}
+      },
+      () => {
+        const copy = Object.assign({}, r, {id: uid("r"), name: (r.name || "") + " (copy)"});
+        const at = state.recurrences.indexOf(r);
+        state.recurrences.splice(at < 0 ? state.recurrences.length : at + 1, 0, copy);
+        persistCore("recurrences"); render();
+      },
+      "Duplicate this row — for when the amount changes partway through")}
   ];
 
   sec.appendChild(gridTable(cols, rows.map(r => ({item:r})), {
@@ -4590,6 +5151,170 @@ function sparkSVG(sim){
   return s;
 }
 
+/* ---------- going over budget ---------- */
+
+/** A plain scrim + card. Escape and the backdrop both close it. */
+function showModal(build){
+  const scrim = el("div", "scrim");
+  const card = el("div", "modal");
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
+  document.addEventListener("keydown", onKey);
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  build(card, close);
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+  return close;
+}
+
+/** Goal dates under a one-off hit of over_c taken out of this month's spare cash. */
+function planCostOf(over_c, onDate){
+  const keep = state.recurrences;
+  const before = {}, after = {};
+  let R0, R1;
+  try {
+    R0 = solve();
+    for (const g of (R0.goals || [])){
+      const a = R0.sim.achieved[g.id];
+      before[g.id] = {name: g.name, date: a ? a.date : null};
+    }
+    const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+    state.recurrences = keep.concat([{
+      id: "__overage__", kind: "expense", name: "Overage", categoryId: null,
+      accountId: op.id || null, amount_c: over_c, frequency: "ONETIME", intervalN: 1,
+      anchorDate: onDate, endDate: null, monthEndPolicy: "clamp",
+      businessDayPolicy: "none", note: ""
+    }]);
+    R1 = solve();
+    for (const g of (R1.goals || [])){
+      const a = R1.sim.achieved[g.id];
+      after[g.id] = a ? a.date : null;
+    }
+  } catch (e){
+    state.recurrences = keep;
+    return null;
+  }
+  state.recurrences = keep;
+
+  const slips = [];
+  for (const id of Object.keys(before)){
+    const was = before[id].date, now = after[id];
+    if (was && now){
+      const dd = diffDays(was, now);
+      if (dd > 0) slips.push({name: before[id].name, days: dd, date: now});
+    } else if (was && !now){
+      slips.push({name: before[id].name, days: null, date: null});
+    }
+  }
+  slips.sort((a, b) => (b.days === null ? 1e9 : b.days) - (a.days === null ? 1e9 : a.days));
+  return {slips: slips, lowDelta: R1.sim.low.v - R0.sim.low.v};
+}
+
+/** Envelopes this month with room to give, richest first. Sinking funds are left alone. */
+function donorEnvelopes(mk, exceptId){
+  const M = computeBudget(mk).months[mk];
+  if (!M) return [];
+  const out = [];
+  for (const c of state.categories){
+    if (c.id === exceptId || c.isIncome || c.isEarmarked) continue;
+    const room = Math.min(M.budgeted[c.id] || 0, M.remaining[c.id] || 0);
+    if (room > 0) out.push({id: c.id, name: c.name, room_c: room});
+  }
+  out.sort((a, b) => b.room_c - a.room_c);
+  return out.slice(0, 4);
+}
+
+/**
+ * Going over is a decision, not an accident, so the consequences are shown before
+ * the number sticks. The edit is already committed when this opens; every button
+ * either leaves it, undoes it, or pays for it from somewhere named.
+ */
+function overageDialog(o){
+  showModal((card, close) => {
+    card.appendChild(el("h2", "", "That puts you " + money(o.over_c) + " over"));
+    card.appendChild(el("p", "lede",
+      "You have assigned more than " + o.monthName + " has to give. Here is what each way out costs."));
+
+    const opt = (cls, title, desc) => {
+      const b = el("div", "opt" + (cls ? " " + cls : ""));
+      const h = el("div", "oh");
+      h.appendChild(el("span", "ot", title));
+      b.appendChild(h);
+      if (desc) b.appendChild(el("p", "od", desc));
+      return b;
+    };
+
+    // 1. don't go over
+    const a1 = opt("best", "Put it back", "Return " + o.cat + " to " + money(o.old_c) +
+      ". Nothing else moves and the plan is untouched.");
+    const b1 = el("button", "btn sm primary", "Undo the change");
+    b1.type = "button";
+    b1.addEventListener("click", () => { setBudgeted(o.mk, o.catId, o.old_c); close(); render(); });
+    a1.appendChild(b1);
+    card.appendChild(a1);
+
+    // 2. move it off another envelope
+    const donors = donorEnvelopes(o.mk, o.catId);
+    const a2 = opt("", "Take it from another envelope",
+      donors.length
+        ? "These still have room this month. Moving money across keeps the plan exactly on track."
+        : "Nothing else has room left this month.");
+    if (donors.length){
+      const ul = el("ul");
+      for (const d of donors) ul.appendChild(el("li", "", d.name + " — " + money(d.room_c) + " unspent"));
+      a2.appendChild(ul);
+      for (const d of donors.slice(0, 3)){
+        const take = Math.min(d.room_c, o.over_c);
+        const bd = el("button", "btn sm", "Take " + money(take) + " from " + d.name);
+        bd.type = "button";
+        bd.addEventListener("click", () => {
+          const MM = computeBudget(o.mk).months[o.mk];
+          setBudgeted(o.mk, d.id, ((MM && MM.budgeted[d.id]) || 0) - take);
+          close(); render();
+        });
+        a2.appendChild(bd);
+      }
+    }
+    card.appendChild(a2);
+
+    // 3. let the plan pay for it
+    const a3 = opt("", "Let it come out of the plan",
+      o.planned_c
+        ? "The plan is putting " + money(o.planned_c) + " toward your goals this month. Spending this " +
+          "instead delays them:"
+        : "There is no extra going to goals this month, so this comes straight out of your cushion.");
+    const cost = planCostOf(o.over_c, o.firstDay);
+    if (cost && cost.slips.length){
+      const ul = el("ul");
+      for (const sl of cost.slips.slice(0, 4)){
+        ul.appendChild(el("li", "", sl.days === null
+          ? sl.name + " no longer reached inside the horizon"
+          : sl.name + " slips " + sl.days + " day" + (sl.days === 1 ? "" : "s") + " to " + shortDate(sl.date)));
+      }
+      a3.appendChild(ul);
+    } else if (cost){
+      a3.appendChild(el("p", "od", "No goal date moves — the plan absorbs it."));
+    }
+    const b3 = el("button", "btn sm", "Keep it and accept the delay");
+    b3.type = "button";
+    b3.addEventListener("click", () => { close(); render(); });
+    a3.appendChild(b3);
+    card.appendChild(a3);
+
+    const foot = el("div", "foot");
+    const bc = el("button", "btn sm", "Decide later");
+    bc.type = "button";
+    bc.addEventListener("click", () => { close(); render(); });
+    foot.appendChild(bc);
+    card.appendChild(foot);
+  });
+}
+
 function paneBudget(){
   const pane = el("div");
   const strip = pinnedStrip();
@@ -4663,8 +5388,10 @@ function paneBudget(){
 
   // ---------- income, at the top, where you enter what actually arrived ----------
   const irows = incomeRowsFor(mk);
+  const extras = extraIncomeFor(mk);
   const other = (state.txMonths[mk] || []).filter(t =>
     t.amount_c > 0 && !irows.some(r => r.id === t.id) &&
+    String(t.id).indexOf(EXTRA_PREFIX) !== 0 &&
     (!t.categoryId || isIncomeCategory(state.categories.find(c => c.id === t.categoryId))));
   const otherTotal = other.reduce((s, t) => s + t.amount_c, 0);
 
@@ -4674,7 +5401,8 @@ function paneBudget(){
   isec.appendChild(ih);
   isec.appendChild(el("p", "lede",
     "What you expect this month, and what has actually landed. Type the real figure into Received and it " +
-    "adds to what you have to budget below — it is not an envelope, so it never spends anything."));
+    "adds to what you have to budget below — it is not an envelope, so it never spends anything. " +
+    "Money that no recurring row predicts — a tax refund, a bonus — goes in Additional income underneath."));
 
   const ITPL = "minmax(180px,1.6fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr)";
   const iwrap = el("div", "gridwrap");
@@ -4713,6 +5441,41 @@ function paneBudget(){
     row.appendChild(sc);
     igrid.appendChild(stack(row));
   }
+  let extraTot = 0;
+  if (extras.length){
+    const eh = el("div", "grow grouphead");
+    eh.style.gridTemplateColumns = ITPL;
+    const en = el("div", "gc ro lbl");
+    en.appendChild(el("b", "", "Additional income"));
+    eh.appendChild(en);
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    igrid.appendChild(eh);
+  }
+  for (const t of extras){
+    extraTot += t.amount_c;
+    const row = el("div", "grow");
+    row.style.gridTemplateColumns = ITPL;
+    row.appendChild(cellInput({id:"xn-" + t.id, v: t.payee || ""}, "v", "text",
+      (val) => { updateExtraIncome(mk, t.id, {payee: val}); scheduleRender(); },
+      {placeholder:"Tax refund, bonus \u2026"}));
+    row.appendChild(cellInput({id:"xd-" + t.id, v: t.date}, "v", "date",
+      (val) => { updateExtraIncome(mk, t.id, {date: val || (mk + "-01")}); scheduleRender(); }));
+    row.appendChild(cellReadonly("one-off"));
+    row.appendChild(cellInput({id:"xa-" + t.id, v: t.amount_c}, "v", "money",
+      (val) => { updateExtraIncome(mk, t.id, {amount_c: Math.abs(toCents(val))}); render(); }));
+    const xc = el("div", "gc act");
+    const xb = el("button", "xbtn", "\u00d7");
+    xb.type = "button";
+    xb.title = "Remove this one-off";
+    xb.addEventListener("click", () => { removeExtraIncome(mk, t.id); render(); });
+    xc.appendChild(xb);
+    row.appendChild(xc);
+    igrid.appendChild(stack(row));
+  }
+  gotTot += extraTot;
   if (otherTotal){
     const row = el("div", "grow");
     row.style.gridTemplateColumns = ITPL;
@@ -4724,7 +5487,7 @@ function paneBudget(){
     igrid.appendChild(row);
     gotTot += otherTotal;
   }
-  if (!irows.length && !otherTotal){
+  if (!irows.length && !otherTotal && !extras.length){
     igrid.appendChild(el("div", "empty",
       "No income rows for " + monthLabel(mk) + ". Add your paychecks on the Income tab and they appear here."));
   } else {
@@ -4740,17 +5503,41 @@ function paneBudget(){
     igrid.appendChild(tot);
   }
   iwrap.appendChild(igrid);
+  const ibar = el("div", "addbar");
+  const iadd = el("button", "btn sm", "+ Add one-off income");
+  iadd.type = "button";
+  iadd.title = "A tax refund, a bonus, a rebate \u2014 money this month that no recurring row predicts.";
+  iadd.addEventListener("click", () => { addExtraIncome(mk); render(); });
+  ibar.appendChild(iadd);
+  iwrap.appendChild(ibar);
   isec.appendChild(iwrap);
   pane.appendChild(isec);
 
   // ---------- to be budgeted ----------
-  const top = el("div", "tbb" + (M.tbb < 0 ? " over" : (M.tbb === 0 ? " zero" : "")));
+  // ---------- the plan's own claim on this month ----------
+  // The solver commits real money on real paydays. Leaving it off the grid would
+  // show cash as free to budget when it is already promised to a goal.
+  let planned_c = 0, planRows = [];
+  try {
+    const R = solve();
+    for (const p of (R.plan || [])){
+      if (monthKey(p.date) !== mk) continue;
+      for (const it of p.items){
+        planned_c += it.amount_c;
+        planRows.push({date:p.date, name:it.name, amount_c:it.amount_c});
+      }
+    }
+  } catch (e){ planned_c = 0; }
+
+  const freeTbb = M.tbb - planned_c;
+  const top = el("div", "tbb" + (freeTbb < 0 ? " over" : (freeTbb === 0 ? " zero" : "")));
   const l = el("div", "tbbl");
   l.appendChild(el("div", "k", "Left to be budgeted"));
-  l.appendChild(el("div", "v num", money(M.tbb)));
-  const msg = M.tbb < 0
-    ? "You've assigned " + money(-M.tbb) + " more than you have."
-    : (M.tbb === 0 ? "Every dollar has a job." : "Still unassigned.");
+  l.appendChild(el("div", "v num", money(freeTbb)));
+  const msg = freeTbb < 0
+    ? "You've assigned " + money(-freeTbb) + " more than you have."
+    : (freeTbb === 0 ? "Every dollar has a job."
+       : (planned_c ? "Still unassigned, after " + money(planned_c) + " promised to the plan." : "Still unassigned."));
   l.appendChild(el("div", "s", msg));
   top.appendChild(l);
 
@@ -4770,6 +5557,7 @@ function paneBudget(){
   r.appendChild(stat("Budgeted", money(M.budgetedTotal), state.categories.length + " categories"));
   r.appendChild(stat("Spent", money(-M.activityTotal), "actual"));
   r.appendChild(stat("Remaining", money(M.remainingTotal), "carried forward"));
+  if (planned_c) r.appendChild(stat("To the plan", money(planned_c), "extra toward goals"));
   top.appendChild(r);
   pane.appendChild(top);
 
@@ -4872,7 +5660,17 @@ function paneBudget(){
           const raw = String(val).trim();
           const neg = /^-/.test(raw);
           const cents = Math.abs(toCents(raw)) * (neg ? -1 : 1);
+          const was = M.budgeted[c.id] || 0;
           setBudgeted(mk, c.id, cents);
+          // Only when this edit is what pushes it over — not on every keystroke in an
+          // already-negative month, which would be unusable.
+          const after = freeTbb - (cents - was);
+          if (cents > was && after < 0 && freeTbb >= 0){
+            overageDialog({mk: mk, catId: c.id, cat: c.name, old_c: was, new_c: cents,
+                           over_c: -after, planned_c: planned_c,
+                           monthName: monthLabel(mk), firstDay: mk + "-01"});
+            return;
+          }
           scheduleRender();
         }, {signed:true}));
 
@@ -4891,6 +5689,37 @@ function paneBudget(){
       grid.appendChild(row);
     }
   }
+  if (planned_c > 0){
+    const gh = el("div", "grow grouphead");
+    gh.style.gridTemplateColumns = TPL;
+    const gn = el("div", "gc ro lbl");
+    gn.appendChild(el("b", "", "The plan"));
+    gh.appendChild(gn);
+    gh.appendChild(cellReadonly(""));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    gh.appendChild(cellReadonly(money(0)));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    grid.appendChild(gh);
+
+    const row = el("div", "grow locked");
+    row.style.gridTemplateColumns = TPL;
+    const nameCell = el("div", "gc ro lbl");
+    nameCell.appendChild(el("span", "", "Extra toward goals"));
+    const t = el("span", "tag lock", "from the plan");
+    t.title = planRows.map(r => shortDate(r.date) + " · " + r.name + " " + money(r.amount_c)).join("\n");
+    nameCell.appendChild(t);
+    row.appendChild(nameCell);
+    row.appendChild(cellReadonly(money(0)));
+    row.appendChild(cellReadonly(money(planned_c)));
+    row.appendChild(cellReadonly(money(0)));
+    const rc = el("div", "gc ro");
+    rc.appendChild(el("span", "num pos", money(planned_c)));
+    row.appendChild(rc);
+    const BL = ["Category", "Carried in", "Budgeted", "Actual", "Remaining"];
+    Array.prototype.forEach.call(row.children, (c, i) => { if (BL[i]) c.setAttribute("data-label", BL[i]); });
+    grid.appendChild(row);
+  }
+
   wrap.appendChild(grid);
   pane.appendChild(wrap);
 
@@ -5035,7 +5864,7 @@ function paneSchedule(){
         cal.appendChild(dh);
       }
       const isInc = e.rec.kind === "income";
-      const amt = Math.abs(e.rec.amount_c);
+      const amt = amountOn(e.rec, e.date);
       running += isInc ? amt : -amt;
       const row = el("div", "calrow" + (isInc ? " inc" : ""));
       row.appendChild(el("span", "calname", e.rec.name || "(unnamed)"));
@@ -5459,43 +6288,11 @@ function paneData(){
   const h2 = el("div", "sechead");
   h2.appendChild(el("h2", "", "Settings"));
   sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "How the app behaves. Your starting balances, the as-of date and the floor live on the "
+    + "Accounts tab, beside the balances they describe."));
 
   const s = state.settings || blankSettings();
-
-  const f1 = el("div", "fld");
-  f1.appendChild(el("label", "", "Balances as of"));
-  const i1 = el("input"); i1.type = "date"; i1.id = "set-asof"; i1.value = s.asOfDate || todayISO();
-  i1.addEventListener("change", () => { s.asOfDate = i1.value; persistCore("settings"); });
-  f1.appendChild(i1);
-  f1.appendChild(el("div", "hint", "The date your entered balances are true as of. The legacy file called this Goals!C3."));
-  sec2.appendChild(f1);
-
-  const f2 = el("div", "fld");
-  f2.appendChild(el("label", "", "Operating floor"));
-  const i2 = el("input"); i2.type = "text"; i2.inputMode = "decimal"; i2.id = "set-floor";
-  i2.value = fromCents(s.operatingFloor_c || 0);
-  i2.addEventListener("change", () => {
-    s.operatingFloor_c = Math.abs(toCents(i2.value));
-    i2.value = fromCents(s.operatingFloor_c); persistCore("settings"); render();
-  });
-  f2.appendChild(i2);
-  f2.appendChild(el("div", "hint", "A hard zero-guard the projection may never dip below. Asserted in integer cents on every single day — your workbook's $500 cushion was missed by $1.10 and it accepted the miss."));
-  sec2.appendChild(f2);
-
-  const f2b = el("div", "fld");
-  f2b.appendChild(el("label", "", "Buffer already saved, held in checking"));
-  const i2b = el("input"); i2b.type = "text"; i2b.inputMode = "decimal"; i2b.id = "set-bufheld";
-  i2b.value = fromCents(s.bufferHeld_c || 0);
-  i2b.addEventListener("change", () => {
-    s.bufferHeld_c = Math.abs(toCents(i2b.value));
-    i2b.value = fromCents(s.bufferHeld_c); persistCore("settings"); render();
-  });
-  f2b.appendChild(i2b);
-  f2b.appendChild(el("div", "hint",
-    "Buffer money sitting inside your operating account rather than a separate one. It's in the balance but " +
-    "it isn't spendable, so it's added to the floor — the projection will never quietly eat it. " +
-    "Effective floor: " + money(( s.operatingFloor_c || 0) + (s.bufferHeld_c || 0)) + "."));
-  sec2.appendChild(f2b);
 
   const f3 = el("div", "fld");
   f3.appendChild(el("label", "", "Month-end rollover"));
@@ -5740,11 +6537,47 @@ function initTheme(){
 async function boot(){
   initTheme();
   state.settings = blankSettings();
-  render();                       // paint immediately; never block first paint on a capability
+  state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
+  state.txMonths = {}; state.budgetMonths = {};
+
+  if (cloudConfigured() && !sbInit()){
+    document.getElementById("panes").textContent =
+      "Could not load the Supabase client. Check your connection and reload.";
+    return;
+  }
   setSave("", "loading…");
   await loadAll();
-  ensureBudgetHorizon();
+
+  if (store.mode === "anon"){
+    const msg = authLinkMessage();
+    clearAuthLink();
+    authGate(msg);
+    setSave("", "signed out");
+    return;
+  }
+  clearAuthLink();                // arrived via a confirmation link and already signed in
+
+  ensureBudgetHorizon();          // always some months planned ahead
+
+  for (const id of ["nav", "strip", "stripnote"]){
+    const n = document.getElementById(id);
+    if (n) n.hidden = false;
+  }
   render();
+  if (store.mode === "supabase") mountAccountChip();
+}
+
+function mountAccountChip(){
+  const bar = document.querySelector(".topbar-in");
+  if (!bar || document.getElementById("whoami")) return;
+  const who = el("span", "savechip", sbUser && sbUser.email ? sbUser.email : "signed in");
+  who.id = "whoami";
+  const out = el("button", "btn sm ghost", "Sign out");
+  out.type = "button";
+  out.addEventListener("click", signOut);
+  const anchor = bar.querySelector("#themeBtn");
+  bar.insertBefore(who, anchor);
+  bar.insertBefore(out, anchor);
 }
 
 boot();
