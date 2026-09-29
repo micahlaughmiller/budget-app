@@ -246,6 +246,8 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .fixtext{font-size:12.5px; color:var(--muted); flex:1 1 260px; min-width:0}
 .fixbtns{display:flex; gap:7px; flex-wrap:wrap; margin-top:9px}
 
+.startgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:16px; margin-bottom:10px}
+.startgrid .fld input{max-width:none; width:100%}
 /* ---------- sign-in gate ---------- */
 .authbox{
   max-width:400px; margin:56px auto; padding:26px;
@@ -352,9 +354,48 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .chart .endval{font-family:var(--font-mono); font-size:10.5px; opacity:.8}
 .chart .lowdot{fill:var(--warn); stroke:var(--surface); stroke-width:1.6}
 .chart .callout{font-family:var(--font-ui); font-size:10.5px; fill:var(--warn); font-weight:600}
-.chart .flagline{stroke:var(--muted); stroke-width:1; stroke-dasharray:2 2}
-.chart .flagdot{fill:var(--c-net); stroke:var(--surface); stroke-width:1.4}
-.chart .flaglab{font-family:var(--font-ui); font-size:10px; fill:var(--ink-2)}
+.chart .flagline{stroke:var(--muted); stroke-width:1; stroke-dasharray:2 2; opacity:.55}
+.chart .mstone{fill:var(--c-net); stroke:var(--surface); stroke-width:1.4}
+.chart .mnum{font-family:var(--font-ui); font-size:8px; font-weight:700; fill:var(--surface)}
+
+/* the overage dialog */
+.scrim{position:fixed; inset:0; background:rgba(0,0,0,.42); z-index:60;
+  display:flex; align-items:center; justify-content:center; padding:18px}
+.modal{background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  box-shadow:0 18px 50px rgba(0,0,0,.28); width:min(560px,100%); max-height:88vh; overflow:auto;
+  padding:18px 20px}
+.modal h2{font-family:var(--font-ui); font-size:16px; margin:0 0 4px}
+.modal .lede{margin:0 0 14px}
+.opt{border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin:0 0 9px;
+  background:var(--surface-2)}
+.opt.best{border-color:var(--accent); background:var(--accent-soft)}
+.opt .oh{display:flex; gap:8px; align-items:center; margin:0 0 5px}
+.opt .ot{font-family:var(--font-ui); font-size:13px; font-weight:700; color:var(--ink)}
+.opt .od{font-family:var(--font-ui); font-size:12px; color:var(--ink-2); margin:0 0 8px}
+.opt ul{margin:0 0 8px; padding-left:16px}
+.opt li{font-family:var(--font-ui); font-size:12px; color:var(--ink-2); margin:2px 0}
+.opt .btn{margin:0 6px 0 0}
+.modal .foot{display:flex; gap:8px; justify-content:flex-end; margin-top:12px}
+
+.planbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+  border:1px solid var(--line); border-radius:10px; background:var(--surface-2);
+  padding:9px 12px; margin:0 0 12px}
+.planbar .lede{margin:0; font-size:12px}
+.planbar .chip{font-size:11.5px}
+
+/* the graph and the milestone key sit side by side; the key stacks under it when narrow */
+.chartrow{display:grid; grid-template-columns:minmax(0,1fr) 250px; gap:14px; align-items:start}
+@media (max-width:900px){ .chartrow{grid-template-columns:minmax(0,1fr)} }
+.mkey{border:1px solid var(--line); border-radius:10px; background:var(--surface-2); padding:10px 11px}
+.mkey h3{font-family:var(--font-ui); font-size:11px; font-weight:700; letter-spacing:.04em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 8px}
+.mkey ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px}
+.mkey li{display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:start}
+.mkey .pip{width:18px; height:18px; display:block; flex:none}
+.mkey .mdate{font-family:var(--font-mono); font-size:11px; color:var(--ink-2); display:block}
+.mkey .mwhat{font-family:var(--font-ui); font-size:12px; font-weight:600; color:var(--ink); display:block;
+  overflow-wrap:anywhere}
+.mkey .none{font-family:var(--font-ui); font-size:12px; color:var(--muted); margin:0}
 
 :root{
   --c-net:#0F766E; --c-cash:#2563A8; --c-liab:#A63D2F; --c-inv:#6B4FA8; --c-save:#3F7A2E;
@@ -1022,6 +1063,7 @@ function blankSettings(){
     budgetLookaheadMonths: 6,         // months kept budgeted ahead of today
     openingTBB_c: null,               // null = seed from cash balances
     budgetStartMonth: null,           // envelopes carry from here; earlier months are history
+    baseline: null,                   // the plan you locked in at setup, to measure drift against
     createdAt: todayISO()
   };
 }
@@ -2557,19 +2599,20 @@ function chartSVG(sim){
          '" class="callout" text-anchor="' + (lowRight ? "start" : "end") + '">Tightest day: ' +
          esc(shortDate(sim.low.date)) + ' · ' + esc(money0(sim.low.v)) + '</text>';
 
-  // --- milestone flags ---
-  const flags = sim.events.slice(0, 6);
-  let band = 0;
-  for (const ev of flags){
+  // --- milestones: a numbered diamond on the curve, named in the legend beside it ---
+  const flags = (sim.events || []).slice(0, 12);
+  flags.forEach((ev, i) => {
     const ex = x(ev.d), ey = y(sim.net[ev.d]);
-    const ty = Math.max(mt + 14, ey - 16 - band * 15); band = (band + 1) % 3;
-    svg += '<line x1="' + ex.toFixed(1) + '" y1="' + ey.toFixed(1) + '" x2="' + ex.toFixed(1) + '" y2="' + ty.toFixed(1) + '" class="flagline"/>';
-    svg += '<circle cx="' + ex.toFixed(1) + '" cy="' + ey.toFixed(1) + '" r="3" class="flagdot"/>';
-    const right = ex < ml + iw * 0.7;
-    svg += '<text x="' + (right ? ex + 6 : ex - 6).toFixed(1) + '" y="' + ty.toFixed(1) +
-           '" class="flaglab" text-anchor="' + (right ? "start" : "end") + '">' +
-           esc(ev.text) + ' · ' + esc(shortDate(ev.date)) + '</text>';
-  }
+    const r = 6.5;
+    svg += '<line x1="' + ex.toFixed(1) + '" y1="' + (mt + ih).toFixed(1) +
+           '" x2="' + ex.toFixed(1) + '" y2="' + ey.toFixed(1) + '" class="flagline"/>';
+    svg += '<path d="M' + ex.toFixed(1) + ' ' + (ey - r).toFixed(1) +
+           'L' + (ex + r).toFixed(1) + ' ' + ey.toFixed(1) +
+           'L' + ex.toFixed(1) + ' ' + (ey + r).toFixed(1) +
+           'L' + (ex - r).toFixed(1) + ' ' + ey.toFixed(1) + 'Z" class="mstone"/>';
+    svg += '<text x="' + ex.toFixed(1) + '" y="' + (ey + 0.5).toFixed(1) +
+           '" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text>';
+  });
 
   svg += '</svg>';
   return svg;
@@ -3781,6 +3824,129 @@ function changeStrip(R){
   return box;
 }
 
+/** The numbered diamonds on the curve, spelled out beside it: date, then what happens. */
+/* ---------- the original plan ---------- */
+
+/**
+ * Once the setup is confirmed the plan is worth freezing, because every later change
+ * is only meaningful against something. It lives in settings so it follows the file
+ * into every backend and out through the export.
+ */
+function captureBaseline(R){
+  const sim = R.sim;
+  const b = {savedAt: todayISO(), asOfDate: state.settings.asOfDate, goals: {},
+             low_c: sim.low.v, lowDate: sim.low.date, netEnd_c: sim.net[sim.nDays], debtFree: null};
+  for (const g of (R.goals || [])){
+    const a = sim.achieved[g.id];
+    b.goals[g.id] = {name: g.name, date: a ? a.date : null, target_c: g.target_c};
+  }
+  const df = (sim.events || []).find(e => e.text === "Debt free");
+  b.debtFree = df ? df.date : null;
+  state.settings.baseline = b;
+  persistCore("settings");
+}
+
+/** What has moved since the plan was locked. Returns null when there is nothing to say. */
+function baselineDrift(R){
+  const b = state.settings.baseline;
+  if (!b || !b.goals) return null;
+  const sim = R.sim, items = [];
+  for (const g of (R.goals || [])){
+    const was = b.goals[g.id];
+    const a = sim.achieved[g.id];
+    const now = a ? a.date : null;
+    if (!was){
+      items.push({txt: g.name + " added since" + (now ? " · " + shortDate(now) : ""), good: null});
+      continue;
+    }
+    if (was.date && now){
+      const dd = diffDays(was.date, now);
+      if (!dd) continue;
+      items.push({txt: g.name + " " + Math.abs(dd) + " day" + (Math.abs(dd) === 1 ? "" : "s") +
+                       (dd > 0 ? " later" : " earlier") + " than planned", good: dd < 0});
+    } else if (now && !was.date){
+      items.push({txt: g.name + " now reachable · " + shortDate(now), good: true});
+    } else if (!now && was.date){
+      items.push({txt: g.name + " has fallen out of the horizon", good: false});
+    }
+  }
+  for (const id of Object.keys(b.goals)){
+    if (!(R.goals || []).some(g => g.id === id)) items.push({txt: b.goals[id].name + " removed", good: null});
+  }
+  if (b.low_c != null && b.low_c !== sim.low.v){
+    const dd = sim.low.v - b.low_c;
+    items.push({txt: "lowest cash " + (dd > 0 ? "+" : "") + money0(dd) + " vs plan", good: dd > 0});
+  }
+  return {baseline: b, items: items};
+}
+
+/** The header control plus, once locked, the drift strip. */
+function baselineSection(R){
+  const wrap = el("div");
+  const d = baselineDrift(R);
+  const bar = el("div", "planbar");
+
+  if (!d){
+    bar.appendChild(el("span", "clabel", "Original plan"));
+    bar.appendChild(el("span", "lede",
+      "Lock this projection in once your setup is right and every change after it is measured against it."));
+    const lock = el("button", "btn sm primary", "Lock this as my original plan");
+    lock.type = "button";
+    lock.addEventListener("click", () => { captureBaseline(R); render(); });
+    bar.appendChild(lock);
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  bar.appendChild(el("span", "clabel", "Original plan · locked " + shortDate(d.baseline.savedAt)));
+  if (!d.items.length){
+    bar.appendChild(el("span", "chip good", "still exactly on plan"));
+  } else {
+    for (const i of d.items){
+      const c = el("span", "chip " + (i.good === null ? "" : (i.good ? "good" : "bad")));
+      c.textContent = i.txt;
+      bar.appendChild(c);
+    }
+  }
+  bar.appendChild(el("div", "sp"));
+  const re = el("button", "btn sm", "Re-lock to today");
+  re.type = "button";
+  re.title = "Replace the original plan with the projection as it stands now.";
+  re.addEventListener("click", () => {
+    if (!confirm("Replace your original plan with today's projection? The old one is not kept.")) return;
+    captureBaseline(R); render();
+  });
+  bar.appendChild(re);
+  wrap.appendChild(bar);
+  return wrap;
+}
+
+function milestoneKey(sim){
+  const wrap = el("div", "mkey");
+  wrap.appendChild(el("h3", "", "Milestones"));
+  const evs = (sim.events || []).slice(0, 12);
+  if (!evs.length){
+    wrap.appendChild(el("p", "none", "No goal is reached inside the horizon yet."));
+    return wrap;
+  }
+  const ol = el("ol");
+  evs.forEach((ev, i) => {
+    const li = el("li");
+    const pip = el("span", "pip");
+    pip.innerHTML = '<svg viewBox="0 0 18 18" class="chart" aria-hidden="true">' +
+      '<path d="M9 2L16 9L9 16L2 9Z" class="mstone"/>' +
+      '<text x="9" y="9.5" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text></svg>';
+    li.appendChild(pip);
+    const txt = el("div");
+    txt.appendChild(el("span", "mdate", longDate(ev.date)));
+    txt.appendChild(el("span", "mwhat", ev.text));
+    li.appendChild(txt);
+    ol.appendChild(li);
+  });
+  wrap.appendChild(ol);
+  return wrap;
+}
+
 function paneDashboard(){
   const pane = el("div");
   const d = derive();
@@ -3801,6 +3967,7 @@ function paneDashboard(){
   const ms = t0 ? ((typeof performance !== "undefined" ? performance.now() : 0) - t0) : 0;
 
   const chg = changeStrip(R); if (chg) pane.appendChild(chg);
+  pane.appendChild(baselineSection(R));
 
   // A goal with no account behind it is money parked in checking earning nothing.
   // It is easy to create by accident, because the account dropdown defaults to none.
@@ -3920,9 +4087,12 @@ function paneDashboard(){
     : "minimum payments only — no goals to fund"));
   sec.appendChild(h);
 
+  const row = el("div", "chartrow");
   const box = el("div", "chartbox");
   box.innerHTML = chartSVG(sim);
-  sec.appendChild(box);
+  row.appendChild(box);
+  row.appendChild(milestoneKey(sim));
+  sec.appendChild(row);
 
   const legend = el("div", "legend");
   const items = [
@@ -4033,9 +4203,69 @@ function paneSetup(){
   return pane;
 }
 
+/** The three numbers everything else is measured from. They belong beside the
+ *  balances they describe, not buried in a settings tab. */
+function startingPointSection(){
+  const s = state.settings || blankSettings();
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Starting point"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Where the projection begins. Balances below are taken to be true as of this date, " +
+    "and the floor is the line your cash is never planned to fall through."));
+
+  const row = el("div", "startgrid");
+
+  const fld = (label, hint, build) => {
+    const f = el("div", "fld");
+    f.style.margin = "0";
+    f.appendChild(el("label", "", label));
+    f.appendChild(build());
+    f.appendChild(el("div", "hint", hint));
+    row.appendChild(f);
+  };
+
+  fld("Balances as of", "Anything dated on or before this is already inside the balances.", () => {
+    const i = el("input"); i.type = "date"; i.id = "set-asof";
+    i.value = s.asOfDate || todayISO();
+    i.addEventListener("change", () => { s.asOfDate = i.value; persistCore("settings"); render(); });
+    return i;
+  });
+
+  fld("Operating floor", "A hard guard the plan may never dip below.", () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-floor";
+    i.value = fromCents(s.operatingFloor_c || 0);
+    i.addEventListener("change", () => {
+      s.operatingFloor_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.operatingFloor_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  fld("Buffer already saved", "Buffer money sitting in the operating account. Added to the floor so it is never spent.", () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-bufheld";
+    i.value = fromCents(s.bufferHeld_c || 0);
+    i.addEventListener("change", () => {
+      s.bufferHeld_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.bufferHeld_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  sec.appendChild(row);
+  sec.appendChild(el("p", "hint",
+    "Effective floor: " + money((s.operatingFloor_c || 0) + (s.bufferHeld_c || 0)) +
+    ", plus whatever your sinking funds hold."));
+  return sec;
+}
+
 function paneAccounts(){
   const d = derive();
   const pane = el("div");
+  pane.appendChild(startingPointSection());
   const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
 
   const sec = el("div", "sec");
@@ -4813,6 +5043,170 @@ function sparkSVG(sim){
   return s;
 }
 
+/* ---------- going over budget ---------- */
+
+/** A plain scrim + card. Escape and the backdrop both close it. */
+function showModal(build){
+  const scrim = el("div", "scrim");
+  const card = el("div", "modal");
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
+  document.addEventListener("keydown", onKey);
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  build(card, close);
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+  return close;
+}
+
+/** Goal dates under a one-off hit of over_c taken out of this month's spare cash. */
+function planCostOf(over_c, onDate){
+  const keep = state.recurrences;
+  const before = {}, after = {};
+  let R0, R1;
+  try {
+    R0 = solve();
+    for (const g of (R0.goals || [])){
+      const a = R0.sim.achieved[g.id];
+      before[g.id] = {name: g.name, date: a ? a.date : null};
+    }
+    const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+    state.recurrences = keep.concat([{
+      id: "__overage__", kind: "expense", name: "Overage", categoryId: null,
+      accountId: op.id || null, amount_c: over_c, frequency: "ONETIME", intervalN: 1,
+      anchorDate: onDate, endDate: null, monthEndPolicy: "clamp",
+      businessDayPolicy: "none", note: ""
+    }]);
+    R1 = solve();
+    for (const g of (R1.goals || [])){
+      const a = R1.sim.achieved[g.id];
+      after[g.id] = a ? a.date : null;
+    }
+  } catch (e){
+    state.recurrences = keep;
+    return null;
+  }
+  state.recurrences = keep;
+
+  const slips = [];
+  for (const id of Object.keys(before)){
+    const was = before[id].date, now = after[id];
+    if (was && now){
+      const dd = diffDays(was, now);
+      if (dd > 0) slips.push({name: before[id].name, days: dd, date: now});
+    } else if (was && !now){
+      slips.push({name: before[id].name, days: null, date: null});
+    }
+  }
+  slips.sort((a, b) => (b.days === null ? 1e9 : b.days) - (a.days === null ? 1e9 : a.days));
+  return {slips: slips, lowDelta: R1.sim.low.v - R0.sim.low.v};
+}
+
+/** Envelopes this month with room to give, richest first. Sinking funds are left alone. */
+function donorEnvelopes(mk, exceptId){
+  const M = computeBudget(mk).months[mk];
+  if (!M) return [];
+  const out = [];
+  for (const c of state.categories){
+    if (c.id === exceptId || c.isIncome || c.isEarmarked) continue;
+    const room = Math.min(M.budgeted[c.id] || 0, M.remaining[c.id] || 0);
+    if (room > 0) out.push({id: c.id, name: c.name, room_c: room});
+  }
+  out.sort((a, b) => b.room_c - a.room_c);
+  return out.slice(0, 4);
+}
+
+/**
+ * Going over is a decision, not an accident, so the consequences are shown before
+ * the number sticks. The edit is already committed when this opens; every button
+ * either leaves it, undoes it, or pays for it from somewhere named.
+ */
+function overageDialog(o){
+  showModal((card, close) => {
+    card.appendChild(el("h2", "", "That puts you " + money(o.over_c) + " over"));
+    card.appendChild(el("p", "lede",
+      "You have assigned more than " + o.monthName + " has to give. Here is what each way out costs."));
+
+    const opt = (cls, title, desc) => {
+      const b = el("div", "opt" + (cls ? " " + cls : ""));
+      const h = el("div", "oh");
+      h.appendChild(el("span", "ot", title));
+      b.appendChild(h);
+      if (desc) b.appendChild(el("p", "od", desc));
+      return b;
+    };
+
+    // 1. don't go over
+    const a1 = opt("best", "Put it back", "Return " + o.cat + " to " + money(o.old_c) +
+      ". Nothing else moves and the plan is untouched.");
+    const b1 = el("button", "btn sm primary", "Undo the change");
+    b1.type = "button";
+    b1.addEventListener("click", () => { setBudgeted(o.mk, o.catId, o.old_c); close(); render(); });
+    a1.appendChild(b1);
+    card.appendChild(a1);
+
+    // 2. move it off another envelope
+    const donors = donorEnvelopes(o.mk, o.catId);
+    const a2 = opt("", "Take it from another envelope",
+      donors.length
+        ? "These still have room this month. Moving money across keeps the plan exactly on track."
+        : "Nothing else has room left this month.");
+    if (donors.length){
+      const ul = el("ul");
+      for (const d of donors) ul.appendChild(el("li", "", d.name + " — " + money(d.room_c) + " unspent"));
+      a2.appendChild(ul);
+      for (const d of donors.slice(0, 3)){
+        const take = Math.min(d.room_c, o.over_c);
+        const bd = el("button", "btn sm", "Take " + money(take) + " from " + d.name);
+        bd.type = "button";
+        bd.addEventListener("click", () => {
+          const MM = computeBudget(o.mk).months[o.mk];
+          setBudgeted(o.mk, d.id, ((MM && MM.budgeted[d.id]) || 0) - take);
+          close(); render();
+        });
+        a2.appendChild(bd);
+      }
+    }
+    card.appendChild(a2);
+
+    // 3. let the plan pay for it
+    const a3 = opt("", "Let it come out of the plan",
+      o.planned_c
+        ? "The plan is putting " + money(o.planned_c) + " toward your goals this month. Spending this " +
+          "instead delays them:"
+        : "There is no extra going to goals this month, so this comes straight out of your cushion.");
+    const cost = planCostOf(o.over_c, o.firstDay);
+    if (cost && cost.slips.length){
+      const ul = el("ul");
+      for (const sl of cost.slips.slice(0, 4)){
+        ul.appendChild(el("li", "", sl.days === null
+          ? sl.name + " no longer reached inside the horizon"
+          : sl.name + " slips " + sl.days + " day" + (sl.days === 1 ? "" : "s") + " to " + shortDate(sl.date)));
+      }
+      a3.appendChild(ul);
+    } else if (cost){
+      a3.appendChild(el("p", "od", "No goal date moves — the plan absorbs it."));
+    }
+    const b3 = el("button", "btn sm", "Keep it and accept the delay");
+    b3.type = "button";
+    b3.addEventListener("click", () => { close(); render(); });
+    a3.appendChild(b3);
+    card.appendChild(a3);
+
+    const foot = el("div", "foot");
+    const bc = el("button", "btn sm", "Decide later");
+    bc.type = "button";
+    bc.addEventListener("click", () => { close(); render(); });
+    foot.appendChild(bc);
+    card.appendChild(foot);
+  });
+}
+
 function paneBudget(){
   const pane = el("div");
   const strip = pinnedStrip();
@@ -4967,13 +5361,30 @@ function paneBudget(){
   pane.appendChild(isec);
 
   // ---------- to be budgeted ----------
-  const top = el("div", "tbb" + (M.tbb < 0 ? " over" : (M.tbb === 0 ? " zero" : "")));
+  // ---------- the plan's own claim on this month ----------
+  // The solver commits real money on real paydays. Leaving it off the grid would
+  // show cash as free to budget when it is already promised to a goal.
+  let planned_c = 0, planRows = [];
+  try {
+    const R = solve();
+    for (const p of (R.plan || [])){
+      if (monthKey(p.date) !== mk) continue;
+      for (const it of p.items){
+        planned_c += it.amount_c;
+        planRows.push({date:p.date, name:it.name, amount_c:it.amount_c});
+      }
+    }
+  } catch (e){ planned_c = 0; }
+
+  const freeTbb = M.tbb - planned_c;
+  const top = el("div", "tbb" + (freeTbb < 0 ? " over" : (freeTbb === 0 ? " zero" : "")));
   const l = el("div", "tbbl");
   l.appendChild(el("div", "k", "Left to be budgeted"));
-  l.appendChild(el("div", "v num", money(M.tbb)));
-  const msg = M.tbb < 0
-    ? "You've assigned " + money(-M.tbb) + " more than you have."
-    : (M.tbb === 0 ? "Every dollar has a job." : "Still unassigned.");
+  l.appendChild(el("div", "v num", money(freeTbb)));
+  const msg = freeTbb < 0
+    ? "You've assigned " + money(-freeTbb) + " more than you have."
+    : (freeTbb === 0 ? "Every dollar has a job."
+       : (planned_c ? "Still unassigned, after " + money(planned_c) + " promised to the plan." : "Still unassigned."));
   l.appendChild(el("div", "s", msg));
   top.appendChild(l);
 
@@ -4993,6 +5404,7 @@ function paneBudget(){
   r.appendChild(stat("Budgeted", money(M.budgetedTotal), state.categories.length + " categories"));
   r.appendChild(stat("Spent", money(-M.activityTotal), "actual"));
   r.appendChild(stat("Remaining", money(M.remainingTotal), "carried forward"));
+  if (planned_c) r.appendChild(stat("To the plan", money(planned_c), "extra toward goals"));
   top.appendChild(r);
   pane.appendChild(top);
 
@@ -5095,7 +5507,17 @@ function paneBudget(){
           const raw = String(val).trim();
           const neg = /^-/.test(raw);
           const cents = Math.abs(toCents(raw)) * (neg ? -1 : 1);
+          const was = M.budgeted[c.id] || 0;
           setBudgeted(mk, c.id, cents);
+          // Only when this edit is what pushes it over — not on every keystroke in an
+          // already-negative month, which would be unusable.
+          const after = freeTbb - (cents - was);
+          if (cents > was && after < 0 && freeTbb >= 0){
+            overageDialog({mk: mk, catId: c.id, cat: c.name, old_c: was, new_c: cents,
+                           over_c: -after, planned_c: planned_c,
+                           monthName: monthLabel(mk), firstDay: mk + "-01"});
+            return;
+          }
           scheduleRender();
         }, {signed:true}));
 
@@ -5114,6 +5536,37 @@ function paneBudget(){
       grid.appendChild(row);
     }
   }
+  if (planned_c > 0){
+    const gh = el("div", "grow grouphead");
+    gh.style.gridTemplateColumns = TPL;
+    const gn = el("div", "gc ro lbl");
+    gn.appendChild(el("b", "", "The plan"));
+    gh.appendChild(gn);
+    gh.appendChild(cellReadonly(""));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    gh.appendChild(cellReadonly(money(0)));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    grid.appendChild(gh);
+
+    const row = el("div", "grow locked");
+    row.style.gridTemplateColumns = TPL;
+    const nameCell = el("div", "gc ro lbl");
+    nameCell.appendChild(el("span", "", "Extra toward goals"));
+    const t = el("span", "tag lock", "from the plan");
+    t.title = planRows.map(r => shortDate(r.date) + " · " + r.name + " " + money(r.amount_c)).join("\n");
+    nameCell.appendChild(t);
+    row.appendChild(nameCell);
+    row.appendChild(cellReadonly(money(0)));
+    row.appendChild(cellReadonly(money(planned_c)));
+    row.appendChild(cellReadonly(money(0)));
+    const rc = el("div", "gc ro");
+    rc.appendChild(el("span", "num pos", money(planned_c)));
+    row.appendChild(rc);
+    const BL = ["Category", "Carried in", "Budgeted", "Actual", "Remaining"];
+    Array.prototype.forEach.call(row.children, (c, i) => { if (BL[i]) c.setAttribute("data-label", BL[i]); });
+    grid.appendChild(row);
+  }
+
   wrap.appendChild(grid);
   pane.appendChild(wrap);
 
@@ -5682,43 +6135,11 @@ function paneData(){
   const h2 = el("div", "sechead");
   h2.appendChild(el("h2", "", "Settings"));
   sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "How the app behaves. Your starting balances, the as-of date and the floor live on the "
+    + "Accounts tab, beside the balances they describe."));
 
   const s = state.settings || blankSettings();
-
-  const f1 = el("div", "fld");
-  f1.appendChild(el("label", "", "Balances as of"));
-  const i1 = el("input"); i1.type = "date"; i1.id = "set-asof"; i1.value = s.asOfDate || todayISO();
-  i1.addEventListener("change", () => { s.asOfDate = i1.value; persistCore("settings"); });
-  f1.appendChild(i1);
-  f1.appendChild(el("div", "hint", "The date your entered balances are true as of. The legacy file called this Goals!C3."));
-  sec2.appendChild(f1);
-
-  const f2 = el("div", "fld");
-  f2.appendChild(el("label", "", "Operating floor"));
-  const i2 = el("input"); i2.type = "text"; i2.inputMode = "decimal"; i2.id = "set-floor";
-  i2.value = fromCents(s.operatingFloor_c || 0);
-  i2.addEventListener("change", () => {
-    s.operatingFloor_c = Math.abs(toCents(i2.value));
-    i2.value = fromCents(s.operatingFloor_c); persistCore("settings"); render();
-  });
-  f2.appendChild(i2);
-  f2.appendChild(el("div", "hint", "A hard zero-guard the projection may never dip below. Asserted in integer cents on every single day — your workbook's $500 cushion was missed by $1.10 and it accepted the miss."));
-  sec2.appendChild(f2);
-
-  const f2b = el("div", "fld");
-  f2b.appendChild(el("label", "", "Buffer already saved, held in checking"));
-  const i2b = el("input"); i2b.type = "text"; i2b.inputMode = "decimal"; i2b.id = "set-bufheld";
-  i2b.value = fromCents(s.bufferHeld_c || 0);
-  i2b.addEventListener("change", () => {
-    s.bufferHeld_c = Math.abs(toCents(i2b.value));
-    i2b.value = fromCents(s.bufferHeld_c); persistCore("settings"); render();
-  });
-  f2b.appendChild(i2b);
-  f2b.appendChild(el("div", "hint",
-    "Buffer money sitting inside your operating account rather than a separate one. It's in the balance but " +
-    "it isn't spendable, so it's added to the floor — the projection will never quietly eat it. " +
-    "Effective floor: " + money(( s.operatingFloor_c || 0) + (s.bufferHeld_c || 0)) + "."));
-  sec2.appendChild(f2b);
 
   const f3 = el("div", "fld");
   f3.appendChild(el("label", "", "Month-end rollover"));
