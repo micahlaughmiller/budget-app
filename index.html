@@ -597,7 +597,38 @@ const DAY = 86400000;
  * instead of 15. Typing tolerates that; importing thousands of rows does not.
  * Handles $ signs, thousands separators, parentheses negatives and a trailing minus.
  */
+/**
+ * Money fields accept a running sum: "12.50+8.75+30" is three receipts, not a typo.
+ * Splitting happens here rather than at each call site so every amount in the app —
+ * Actual, Budgeted, an opening balance — behaves the same way.
+ *
+ * Only an operator BETWEEN two numbers splits. A leading minus, a trailing minus and
+ * parentheses all still mean "negative", which they have to, or "-50" would break.
+ */
 function toCents(v){
+  if (typeof v === "string" && /[0-9)]\s*[+\-]\s*[^\s+\-]/.test(v.trim())){
+    const s = v.trim();
+    let total = 0, sign = 1, term = "", seen = false;
+    for (let i = 0; i < s.length; i++){
+      const c = s[i];
+      const isOp = (c === "+" || c === "-") && /[0-9)]\s*$/.test(term);
+      if (isOp){
+        total += sign * oneAmountToCents(term);
+        seen = true;
+        sign = (c === "-") ? -1 : 1;
+        term = "";
+        continue;
+      }
+      term += c;
+    }
+    if (term.trim()) total += sign * oneAmountToCents(term);
+    else if (!seen) return oneAmountToCents(s);
+    return total;
+  }
+  return oneAmountToCents(v);
+}
+
+function oneAmountToCents(v){
   if (v === "" || v == null) return 0;
   if (typeof v === "number") return Math.round(v * 100);
   let s = String(v).trim();
@@ -1032,6 +1063,23 @@ function runFixtures(){
     perMonth(10000, "WEEKLY"), 43333,
     "The legacy 'em fund' sheet used (x/7)*30 and read 5% low");
   t("Monthly equivalent", "$100 bi-weekly", perMonth(10000, "BIWEEKLY"), 21667);
+
+  // --- money parsing, including the running sums people type into Actual ---
+  t("Money", "plain", toCents("12.50"), 1250);
+  t("Money", "grouped", toCents("1,234.56"), 123456);
+  t("Money", "three decimals round half-up", toCents("0.145"), 15,
+    "parseFloat would give 14.4999... and truncate to 14");
+  t("Money", "negative", toCents("-50"), -5000);
+  t("Money", "parentheses are negative", toCents("(50)"), -5000);
+  t("Money", "trailing minus is negative", toCents("50-"), -5000);
+  t("Money", "a sum of receipts", toCents("12.50+8.75+30"), 5125);
+  t("Money", "sum with spaces", toCents("12.50 + 8.75"), 2125);
+  t("Money", "sum with a subtraction", toCents("100-25.50"), 7450);
+  t("Money", "a returned item", toCents("80+20-15"), 8500);
+  t("Money", "grouped terms in a sum", toCents("1,200.00+300"), 150000);
+  t("Money", "a sum is not confused by a leading minus", toCents("-10+4"), -600);
+  t("Money", "trailing operator is ignored", toCents("40+"), 4000);
+  t("Money", "$ signs and spaces survive a sum", toCents("$12.50 + $8.75"), 2125);
   t("Monthly equivalent", "$100 semi-monthly is exactly $200", perMonth(10000, "SEMIMONTHLY"), 20000);
   t("Monthly equivalent", "$600 quarterly is $200", perMonth(60000, "QUARTERLY"), 20000);
   t("Monthly equivalent", "$649 semi-annual", perMonth(64900, "SEMIANNUAL"), 10817);
@@ -1518,6 +1566,27 @@ function ensureBudgetHorizon(){
   return made;
 }
 
+/**
+ * The account the mandatory buffer actually lives in.
+ *
+ * Before this existed the buffer was a number typed into settings that claimed to be
+ * "inside the operating account": it raised the floor so the cash was never spent, but
+ * no real account held it, nothing the budget paid into counted toward it, and it earned
+ * nothing. Naming a real savings account makes the buffer a balance instead of a claim —
+ * so every dollar the budget sends there funds it, and it is reached when the money is
+ * genuinely there.
+ */
+function bufferAccount(){
+  return state.accounts.find(a => a.isBuffer && ACCOUNT_KINDS[a.kind] && !ACCOUNT_KINDS[a.kind].debt) || null;
+}
+
+/** Buffer money already put aside, wherever it is being kept. */
+function bufferFunded_c(){
+  const acct = bufferAccount();
+  if (acct) return Math.max(0, acct.openingBalance_c || 0);
+  return (state.settings && state.settings.bufferHeld_c) || 0;
+}
+
 function budgetParticipatingCash(){
   let sum = 0;
   for (const a of state.accounts){
@@ -1640,7 +1709,9 @@ function simulate(opts){
   // account. Buffer money is in the cash balance but is not spendable, so the projection
   // must not quietly consume it. Earmarked sinking funds join this at M5.
   const guard_c = s.operatingFloor_c || 0;
-  const held_c = s.bufferHeld_c || 0;
+  // Buffer kept in its own account is not in the operating balance, so there is nothing
+  // to protect there. Adding it to the floor as well would reserve the money twice.
+  const held_c = bufferAccount() ? 0 : (s.bufferHeld_c || 0);
   const envelopes = (o.envelopes === false) ? [] : earmarkedEnvelopes();
   for (const e of envelopes) e.bal = e.start_c;
   const floorBase_c = guard_c + held_c;
@@ -1957,11 +2028,17 @@ function buildGoalList(){
   const out = [];
 
   const bufTarget = d.bufferBasisM;
-  const held = s.bufferHeld_c || 0;
+  const bufAcct = bufferAccount();
+  const held = bufferFunded_c();
   if (bufTarget > held){
+    // Linked to a real account when one is named, so the money goes somewhere, earns the
+    // account's rate, and anything the budget already pays in counts toward the target.
     out.push({id:"g-buffer-1mo", name:"Savings buffer — 1 month", priority:0, kind:"savings",
-              target_c:bufTarget, funded_c:held, accountId:null, apr_bps:0, locked:true,
-              targetDate:null, exclusive:true});
+              target_c:bufTarget, funded_c:held,
+              accountId: bufAcct ? bufAcct.id : null,
+              apr_bps: bufAcct ? (bufAcct.apr_bps || 0) : 0,
+              locked:true, targetDate:null, exclusive:true,
+              unlinked: !bufAcct});
   }
   for (const g of state.goals){
     const acct = state.accounts.find(a => a.id === g.linkedAccountId) || null;
@@ -4057,7 +4134,10 @@ function paneDashboard(){
 
   // A goal with no account behind it is money parked in checking earning nothing.
   // It is easy to create by accident, because the account dropdown defaults to none.
-  const orphan = (R.goals || []).filter(g => g.unlinked);
+  // The locked buffer goal is excluded: it is not editable on the Goals tab, so the
+  // "Fix on Goals" button would send you somewhere that cannot fix it. Its own guidance
+  // lives on Accounts and on the Goals-tab buffer ladder.
+  const orphan = (R.goals || []).filter(g => g.unlinked && !g.locked);
   if (orphan.length){
     const b = el("div", "banner warn");
     const t = el("div", "sp");
@@ -4330,8 +4410,14 @@ function startingPointSection(){
     return i;
   });
 
-  fld("Buffer already saved", "Buffer money sitting in the operating account. Added to the floor so it is never spent.", () => {
+  const bufAcct = bufferAccount();
+  fld("Buffer already saved",
+      bufAcct
+        ? "Held in " + (bufAcct.name || "your buffer account") + ", so its balance is the figure that counts. Set there, not here."
+        : "Buffer money sitting in the operating account. Added to the floor so it is never spent. Better: mark a savings account \u201cBuffer lives here\u201d below.",
+      () => {
     const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-bufheld";
+    if (bufAcct){ i.disabled = true; i.value = fromCents(bufferFunded_c()); return i; }
     i.value = fromCents(s.bufferHeld_c || 0);
     i.addEventListener("change", () => {
       s.bufferHeld_c = Math.abs(toCents(i.value));
@@ -4343,8 +4429,9 @@ function startingPointSection(){
 
   sec.appendChild(row);
   sec.appendChild(el("p", "hint",
-    "Effective floor: " + money((s.operatingFloor_c || 0) + (s.bufferHeld_c || 0)) +
-    ", plus whatever your sinking funds hold."));
+    "Effective floor: " + money((s.operatingFloor_c || 0) + (bufferAccount() ? 0 : (s.bufferHeld_c || 0))) +
+    ", plus whatever your sinking funds hold." +
+    (bufferAccount() ? " Your buffer is held outside the operating account, so it does not raise this floor." : "")));
   return sec;
 }
 
@@ -4433,6 +4520,22 @@ function paneAccounts(){
             persistCore("accounts"); render();
           }, {disabled: !(k && !k.debt)});
       }},
+    {label:"Holds the buffer", w:"minmax(150px,1fr)",
+      title:"The account your mandatory savings buffer is kept in. Its balance IS the buffer, so anything the budget pays in counts toward it.",
+      cell:(a) => {
+        const k = ACCOUNT_KINDS[a.kind];
+        const shim = {id:a.id, b: a.isBuffer ? "yes" : "no"};
+        return cellSelect(shim, "b", [{value:"no", label:"\u2014"}, {value:"yes", label:"Buffer lives here"}],
+          v => {
+            // exactly one buffer account, or the target would be funded from two places
+            for (const x of state.accounts) x.isBuffer = false;
+            a.isBuffer = (v === "yes");
+            // the hand-typed figure was a stand-in for exactly this; keeping both
+            // would reserve the same money twice
+            if (a.isBuffer && state.settings) state.settings.bufferHeld_c = 0;
+            persistCore("accounts"); persistCore("settings"); render();
+          }, {disabled: !(k && !k.debt)});
+      }},
     {label:"Contrib is", w:"minmax(120px,.85fr)", title:"Mandatory contributions reduce free cash. Discretionary ones the solver may redirect.",
       cell:(a) => {
         const shim = {id:a.id, m: a.contribution ? String(a.contribution.mandatory) : "true"};
@@ -4454,7 +4557,7 @@ function paneAccounts(){
       state.accounts.push({
         id: uid("a"), name: "", kind: "cash", openingBalance_c: 0, apr_bps: 0,
         compounding: "monthly", minPayment_c: 0, escrow_c: 0, paymentMode: "minimum",
-        isSweep: false, dueDay: 0, originalPrincipal_c: 0,
+        isSweep: false, isBuffer: false, dueDay: 0, originalPrincipal_c: 0,
         originationDate: "", contribution: null, participatesInBudget: true
       });
       persistCore("accounts"); render();
@@ -4661,10 +4764,14 @@ function paneGoals(){
   sec0.appendChild(h0);
   sec0.appendChild(el("p", "lede",
     "Derived from your expenses and debt minimums, so it moves when they do. The 1-month tier's priority is locked at 0 — " +
-    "the amount is still yours to override."));
+    "the amount is still yours to override." +
+    (bufferAccount()
+      ? " Saved reads the live balance of " + (bufferAccount().name || "your buffer account") + "."
+      : " Mark a savings account “Buffer lives here” on the Accounts tab and this tracks its real balance instead of a typed figure.")));
 
   const bg = bufferGoals(d);
-  const held = (state.settings && state.settings.bufferHeld_c) || 0;
+  const held = bufferFunded_c();
+  const bAcct = bufferAccount();
   const bcols = [
     {label:"Goal", w:"minmax(200px,1.6fr)", cell:(g) => cellReadonly(g.name, "lbl")},
     {label:"Target", w:"minmax(110px,.8fr)", cell:(g) => cellReadonly(money0(g.targetAmount_c))},
@@ -5615,8 +5722,8 @@ function paneBudget(){
   const hr = el("div", "grow head");
   hr.style.gridTemplateColumns = TPL;
   for (const [label, tip] of [["Category",""],["Carried in","Last month's Remaining"],
-        ["Budgeted","What you assign. May go negative to move money out of an envelope."],
-        ["Actual","What you actually spent. Typing here writes one reconciling transaction."],
+        ["Budgeted","What you assign. May go negative to move money out of an envelope. Accepts a sum: 200+50."],
+        ["Actual","What you actually spent. Typing here writes one reconciling transaction. Accepts a sum, so several receipts can go in at once: 12.50+8.75+30."],
         ["Remaining","Carried in + Budgeted − Actual. Carries into next month."]]){
     const h = el("div", "gc");
     h.appendChild(el("span", "", label));
