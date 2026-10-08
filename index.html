@@ -1369,7 +1369,10 @@ function incomeRowsFor(mk){
       const tx = txs.find(t => t.id === id);
       rows.push({id:id, recId:r.id, occDate:o.date, name:r.name || "(unnamed)",
                  accountId:r.accountId, categoryId:r.categoryId || "",
-                 planned_c: amountOn(r, o.date), received_c: tx ? tx.amount_c : 0, has: !!tx});
+                 planned_c: overriddenAmount(r, o.date),
+                 standing_c: amountOn(r, o.date),
+                 overridden: overriddenAmount(r, o.date) !== amountOn(r, o.date),
+                 received_c: tx ? tx.amount_c : 0, has: !!tx});
     }
   }
   rows.sort((a, b) => a.occDate.localeCompare(b.occDate));
@@ -1442,7 +1445,7 @@ function plannedIncomeFor(k, afterISO, claims){
     for (const o of occurrences(r, {max:60, from:mStart, until:mEnd})){
       if (claims && claims.has(r.id + "|" + o.date)) continue;
       if (afterISO && o.date <= afterISO) continue;
-      sum += amountOn(r, o.date);
+      sum += overriddenAmount(r, o.date);
     }
   }
   return sum;
@@ -1556,6 +1559,7 @@ function ensureBudgetHorizon(){
     if (!cur || !Object.keys(cur).length){
       const tpl = budgetTemplateFor(shiftMonth(k, -1));
       if (Object.keys(tpl).length){
+        // budgeted figures carry forward; a one-off income override does not
         state.budgetMonths[k] = {budgeted: Object.assign({}, tpl), auto: true};
         made.push(k);
       }
@@ -1585,6 +1589,39 @@ function bufferFunded_c(){
   const acct = bufferAccount();
   if (acct) return Math.max(0, acct.openingBalance_c || 0);
   return (state.settings && state.settings.bufferHeld_c) || 0;
+}
+
+/**
+ * What one income occurrence is expected to pay.
+ *
+ * The recurring row gives the standing figure; a month may override a single
+ * occurrence — a bump, a short cheque, an extra shift. The override is keyed on
+ * {recurrenceId, occurrence date}, the same key the transaction matcher uses, so
+ * moving a payday leaves the old override inert rather than silently reassigning it.
+ *
+ * Everything that asks "what is coming in" goes through here — the income grid, the
+ * budget's expected total, and the cash projection — or the three would disagree.
+ */
+function incomeOverrideKey(recId, occDate){ return recId + "|" + occDate; }
+
+function overriddenAmount(rec, occDate){
+  const m = state.budgetMonths[monthKey(occDate)];
+  const o = m && m.incomeOverrides;
+  if (o){
+    const v = o[incomeOverrideKey(rec.id, occDate)];
+    if (v != null) return Math.abs(v);
+  }
+  return amountOn(rec, occDate);
+}
+
+function setIncomeOverride(mk, recId, occDate, cents){
+  const m = state.budgetMonths[mk] || (state.budgetMonths[mk] = {budgeted:{}});
+  if (!m.incomeOverrides) m.incomeOverrides = {};
+  const k = incomeOverrideKey(recId, occDate);
+  if (cents == null) delete m.incomeOverrides[k];
+  else m.incomeOverrides[k] = Math.abs(cents);
+  if (!Object.keys(m.incomeOverrides).length) delete m.incomeOverrides;
+  persistBudget(mk);
 }
 
 function budgetParticipatingCash(){
@@ -1759,7 +1796,8 @@ function simulate(opts){
       if (r.kind === "expense" && governed(r.categoryId, occ.date)) continue;
       // …and suppress any occurrence a real transaction has already paid
       if (claims && claims.has(r.id + "|" + occ.date)) continue;
-      push(d, ai, sign * amountOn(r, occ.date), r.categoryId);
+      push(d, ai, sign * (r.kind === "income" ? overriddenAmount(r, occ.date)
+                                               : amountOn(r, occ.date)), r.categoryId);
     }
   }
 
@@ -3257,7 +3295,7 @@ async function sbLoadAll(){
     } else if (coll === "txns"){
       state.txMonths[id] = d.items || [];
     } else if (coll === "budget"){
-      state.budgetMonths[id] = {budgeted: d.budgeted || {}};
+      state.budgetMonths[id] = {budgeted: d.budgeted || {}, incomeOverrides: d.incomeOverrides || undefined};
     }
   }
   return (data || []).length;
@@ -3475,7 +3513,10 @@ function persistMonth(key){
 }
 
 function persistBudget(key){
-  queueWrite("budget/" + key, {v: SCHEMA_VERSION, budgeted: (state.budgetMonths[key] || {}).budgeted || {}});
+  const m = state.budgetMonths[key] || {};
+  const doc = {v: SCHEMA_VERSION, budgeted: m.budgeted || {}};
+  if (m.incomeOverrides && Object.keys(m.incomeOverrides).length) doc.incomeOverrides = m.incomeOverrides;
+  queueWrite("budget/" + key, doc);
   saveLocalMirror();
 }
 
@@ -3521,7 +3562,11 @@ async function loadAll(){
           db.collection("budget").limit(600).get()
         ]);
         tx.docs.forEach(doc => { state.txMonths[doc.id] = (doc.data().items) || []; });
-        bd.docs.forEach(doc => { state.budgetMonths[doc.id] = {budgeted: doc.data().budgeted || {}}; });
+        bd.docs.forEach(doc => {
+          const dd = doc.data();
+          state.budgetMonths[doc.id] = {budgeted: dd.budgeted || {},
+                                        incomeOverrides: dd.incomeOverrides || undefined};
+        });
       } catch (e){ await loadMonth(state.activeMonth); }
       setSave("ok", "saved");
       return;
@@ -5508,8 +5553,9 @@ function paneBudget(){
   ih.appendChild(el("h2", "", "Income"));
   isec.appendChild(ih);
   isec.appendChild(el("p", "lede",
-    "What you expect this month, and what has actually landed. Type the real figure into Received and it " +
-    "adds to what you have to budget below — it is not an envelope, so it never spends anything. " +
+    "What you expect this month, and what has actually landed. Expected starts from your recurring income " +
+    "rows — type over it for a month that is different, and only that payday changes. Type the real figure " +
+    "into Received once it lands. Neither is an envelope, so neither ever spends anything. " +
     "Money that no recurring row predicts — a tax refund, a bonus — goes in Additional income underneath."));
 
   const ITPL = "minmax(180px,1.6fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr)";
@@ -5517,7 +5563,7 @@ function paneBudget(){
   const igrid = el("div", "grid");
   const ihr = el("div", "grow head");
   ihr.style.gridTemplateColumns = ITPL;
-  for (const [lbl, tip] of [["Source",""],["Due",""],["Expected","From your recurring income rows"],
+  for (const [lbl, tip] of [["Source",""],["Due",""],["Expected","What this payday is expected to bring. Starts from your recurring income row — type over it for a month that is different, and the change applies to that payday alone."],
         ["Received","What actually arrived. Type it here."],["Still due",""]]){
     const c = el("div", "gc");
     c.appendChild(el("span", "", lbl));
@@ -5538,9 +5584,25 @@ function paneBudget(){
     plannedTot += r.planned_c; gotTot += r.received_c;
     const row = el("div", "grow");
     row.style.gridTemplateColumns = ITPL;
-    row.appendChild(cellReadonly(r.name, "lbl"));
+    const nameCell = el("div", "gc ro lbl");
+    nameCell.appendChild(el("span", "", r.name));
+    if (r.overridden){
+      const t = el("span", "tag");
+      t.textContent = "edited";
+      t.title = "Standing amount " + money(r.standing_c) + ". Click to put it back.";
+      t.style.cursor = "pointer";
+      t.addEventListener("click", () => { setIncomeOverride(mk, r.recId, r.occDate, null); render(); });
+      nameCell.appendChild(t);
+    }
+    row.appendChild(nameCell);
     row.appendChild(cellReadonly(shortDate(r.occDate)));
-    row.appendChild(cellReadonly(money(r.planned_c)));
+    row.appendChild(cellInput({id:"exp-" + r.id, v: r.planned_c}, "v", "money",
+      (val) => {
+        const c = Math.abs(toCents(val));
+        // typing the standing figure back is a revert, not an override to remember
+        setIncomeOverride(mk, r.recId, r.occDate, c === r.standing_c ? null : c);
+        render();
+      }));
     row.appendChild(cellInput({id:"inc-" + r.id, v: r.received_c}, "v", "money",
       (val) => { setIncomeReceived(mk, r, Math.abs(toCents(val))); render(); }));
     const still = Math.max(0, r.planned_c - r.received_c);
