@@ -74,13 +74,37 @@ write(os.path.join(ROOT, "standalone.html"), solo, "no login, starts empty")
 
 # ---------------------------------------------------------------- 2. my-budget
 # The same file with a backup baked in. Gitignored — it holds real figures.
-backup_path = os.path.join(ROOT, "my-budget-backup.json")
-if os.path.exists(backup_path):
+def newest_backup():
+    """The most recently exported backup in the folder, whatever it is called.
+
+    Baking a stale snapshot is worse than baking none: it opens full of numbers
+    that look current and are not. So the file is chosen by the timestamp INSIDE
+    it, not by its name or its mtime.
+    """
+    best, best_when = None, ""
+    for f in os.listdir(ROOT):
+        if not f.endswith(".json"):
+            continue
+        try:
+            d = json.load(io.open(os.path.join(ROOT, f), encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("app") != "better-budget":
+            continue
+        when = str(d.get("exportedAt") or "")
+        if when >= best_when:
+            best, best_when = os.path.join(ROOT, f), when
+    return best
+
+
+backup_path = newest_backup()
+if backup_path:
     payload = json.load(io.open(backup_path, encoding="utf-8"))
     mine = seed_payload(retitle(decloud(src), "My Budget"), payload)
     write(os.path.join(ROOT, "my-budget.html"), mine,
-          "offline, backup of " + str(payload.get("exportedAt", "?"))[:10] + " baked in")
+          "offline, " + os.path.basename(backup_path) + " (" +
+          str(payload.get("exportedAt", "?"))[:10] + ") baked in")
 else:
-    print("  my-budget.html         SKIPPED — no my-budget-backup.json")
+    print("  my-budget.html         SKIPPED — no backup .json found")
 
 print("\ndone")
