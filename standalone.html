@@ -6775,12 +6775,20 @@ async function doExport(){
 
 function doImport(p){
   applyPayload(p);
+  // Every collection has to be written back, not just the ones that live in core.
+  // Restoring into a FRESH account is the whole point of this button, and a month
+  // left unpersisted would sit in memory looking right until the next reload.
   persistCore();
   for (const k of Object.keys(state.txMonths)) persistMonth(k);
+  for (const k of Object.keys(state.budgetMonths)) persistBudget(k);
   state.activeMonth = monthKey(todayISO());
+  if (state.budgetMonths[state.activeMonth]) state.budgetMonth = state.activeMonth;
   render();
-  alert("Restored. " + state.accounts.length + " accounts, " + state.recurrences.length +
-        " recurring rows, " + state.goals.length + " goals.");
+  alert("Restored. " + state.accounts.length + " accounts, " +
+        state.recurrences.length + " recurring rows, " +
+        state.goals.length + " goals, " +
+        Object.keys(state.budgetMonths).length + " budget months, " +
+        Object.keys(state.txMonths).length + " months of transactions.");
 }
 
 function clearAll(){
@@ -6788,9 +6796,14 @@ function clearAll(){
   state.settings = blankSettings();
   state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
   state.txMonths = {}; state.txMonths[state.activeMonth] = [];
+  // Budget months were being left behind, so a "cleared" budget still carried every
+  // envelope figure the moment anything re-read them.
+  const hadBudget = Object.keys(state.budgetMonths);
+  state.budgetMonths = {};
   state.sampleData = false;
   persistCore();
   persistMonth(state.activeMonth);
+  for (const k of hadBudget) persistBudget(k);
   state.tab = "accounts";
   render();
 }
