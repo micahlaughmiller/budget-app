@@ -8,3 +8,6 @@ data-backup.json
 *.xls
 *.xlsx
 *.xlsm
+
+# Converted exports — real figures
+*-sheets/

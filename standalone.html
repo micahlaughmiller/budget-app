@@ -262,6 +262,8 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 }
 .authbox h2{font-size:22px; margin-bottom:6px}
 .authsub{font-size:13px; color:var(--muted); margin:0 0 18px}
+.authrescue{margin-top:16px; padding-top:14px; border-top:1px solid var(--line)}
+.authrescue .authsub{margin:0 0 9px}
 .authfoot{font-size:11.5px; color:var(--faint); margin:16px 0 0}
 .authbox .fld input{max-width:none; width:100%}
 .autherr{
@@ -3385,6 +3387,35 @@ function authGate(message){
 
   box.appendChild(el("p", "authfoot",
     "Your budget lives in your own account and is not shared. Passwords are reset from the Supabase dashboard."));
+
+  // If sign-in is unreachable — the project is paused, offline, out of quota — the
+  // last saved copy is still in this browser. Never make someone get past a login
+  // they cannot pass in order to rescue their own data.
+  let mirrored = null;
+  try { mirrored = localStorage.getItem(LS_KEY); } catch (e){ mirrored = null; }
+  if (mirrored && mirrored.length > 200){
+    const rescue = el("div", "authrescue");
+    let when = "";
+    try {
+      const d = JSON.parse(mirrored);
+      if (d && d.exportedAt) when = " from " + shortDate(String(d.exportedAt).slice(0, 10));
+    } catch (e){ /* a timestamp is a nicety, not a requirement */ }
+    rescue.appendChild(el("p", "authsub",
+      "This browser still holds your last saved budget" + when +
+      ". You can take a copy without signing in."));
+    const b2 = el("button", "btn sm", "Download that backup");
+    b2.type = "button";
+    b2.addEventListener("click", () => {
+      const blob = new Blob([mirrored], {type: "application/json"});
+      const a2 = el("a");
+      a2.href = URL.createObjectURL(blob);
+      a2.download = "better-budget-backup-" + todayISO() + ".json";
+      document.body.appendChild(a2); a2.click();
+      setTimeout(() => { URL.revokeObjectURL(a2.href); document.body.removeChild(a2); }, 0);
+    });
+    rescue.appendChild(b2);
+    box.appendChild(rescue);
+  }
   host.appendChild(box);
 }
 
@@ -3476,6 +3507,28 @@ function reportWriteFailure(e){
   saveLocalMirror();
 }
 
+/**
+ * Read the local mirror back, if it holds anything worth having.
+ * Returns false for a missing, corrupt or empty mirror, so a caller can tell
+ * "nothing here" from "something was recovered".
+ */
+function restoreFromLocalMirror(){
+  let raw = null;
+  try { raw = localStorage.getItem(LS_KEY); } catch (e){ return false; }
+  if (!raw) return false;
+  let p = null;
+  try { p = JSON.parse(raw); } catch (e){ return false; }
+  if (!p || p.app !== "better-budget") return false;
+  const substantial = (p.accounts && p.accounts.length) ||
+                      (p.recurrences && p.recurrences.length) ||
+                      (p.goals && p.goals.length) ||
+                      (p.transactions && Object.keys(p.transactions).length) ||
+                      (p.budgetMonths && Object.keys(p.budgetMonths).length);
+  if (!substantial) return false;
+  try { applyPayload(p); } catch (e){ return false; }
+  return true;
+}
+
 /** A local mirror always runs, so a db hiccup never loses the session's work. */
 function saveLocalMirror(){
   try { localStorage.setItem(LS_KEY, JSON.stringify(exportPayload())); }
@@ -3528,7 +3581,21 @@ async function loadAll(){
     sbUser = session.user;
     store.mode = "supabase";
     const n = await sbLoadAll();
-    if (!n) await seedFirstRun();
+    if (!n){
+      // Zero rows is ambiguous: a genuinely new account, or an account whose rows
+      // could not be read — a paused project, a spend cap, a policy change. Seeding
+      // blank would be written straight back over the local mirror, destroying the
+      // only remaining copy. So an existing mirror wins, and is re-uploaded.
+      const rescued = restoreFromLocalMirror();
+      if (rescued){
+        persistCore();
+        for (const k of Object.keys(state.txMonths)) persistMonth(k);
+        for (const k of Object.keys(state.budgetMonths)) persistBudget(k);
+        setSave("ok", "restored from this browser");
+        return;
+      }
+      await seedFirstRun();
+    }
     setSave("ok", "saved to your account");
     return;
   }
