@@ -129,10 +129,25 @@ def main():
             for mk in months:
                 row.append(dollars((p["budgetMonths"][mk].get("budgeted") or {}).get(c.get("id"), 0)))
             rows.append(row)
+        # A budgeted figure whose category was later deleted still spent real money.
+        # Dropping it would make the sheet's total disagree with the app's, so it gets
+        # its own row and is named for what it is.
+        known = {c.get("id") for c in cats}
+        orphans = []
+        for mk in months:
+            for cid in (p["budgetMonths"][mk].get("budgeted") or {}):
+                if cid not in known and cid not in orphans:
+                    orphans.append(cid)
+        for cid in orphans:
+            row = ["(deleted category)", cid]
+            for mk in months:
+                row.append(dollars((p["budgetMonths"][mk].get("budgeted") or {}).get(cid, 0)))
+            rows.append(row)
+
         total = ["", "TOTAL"]
         for mk in months:
             b = p["budgetMonths"][mk].get("budgeted") or {}
-            total.append(dollars(sum(b.get(c.get("id"), 0) or 0 for c in cats)))
+            total.append(dollars(sum(b.values())))
         rows.append(total)
         write(os.path.join(out, "budget-by-month.csv"), header, rows)
 
