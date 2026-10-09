@@ -67,7 +67,8 @@ h1,h2,h3{font-family:var(--font-display); margin:0; text-wrap:balance; letter-sp
   font-family:var(--font-mono); white-space:nowrap;
 }
 .dot{width:7px; height:7px; border-radius:50%; background:var(--faint); flex:none}
-.dot.ok{background:var(--pos)} .dot.busy{background:var(--warn)} .dot.err{background:var(--neg)}
+.dot.ok{background:var(--pos)} .dot.busy{background:var(--warn)} .dot.warn{background:var(--warn)}
+.dot.err{background:var(--neg)}
 
 /* ---------- buttons ---------- */
 button{font:inherit; color:inherit}
@@ -3433,7 +3434,8 @@ const store = {
   mode: "loading",       // "db" | "local" | "memory"
   queue: new Map(),      // path -> pending body; latest body per path wins
   draining: false,
-  dirty: false
+  dirty: false,
+  cloudError: null       // set when the cloud was configured but unreachable
 };
 
 const LS_KEY = "better-budget-v1";
@@ -3580,7 +3582,24 @@ async function loadAll(){
     if (!session){ store.mode = "anon"; return; }
     sbUser = session.user;
     store.mode = "supabase";
-    const n = await sbLoadAll();
+
+    // A read can fail for reasons that have nothing to do with this budget: the
+    // project paused, the quota spent, the network gone. Letting that throw left
+    // boot() unfinished and the page stuck on "loading…", with no way to reach the
+    // export — the one moment the local copy matters most is the one it was
+    // unreachable in. Fall back to this browser's copy and say so.
+    let n = 0;
+    try {
+      n = await sbLoadAll();
+    } catch (e){
+      store.mode = "local";
+      store.cloudError = (e && e.message) ? e.message : "could not be reached";
+      const have = restoreFromLocalMirror();
+      setSave(have ? "warn" : "err",
+              have ? "offline — using this browser's copy" : "offline — nothing stored here");
+      return;
+    }
+
     if (!n){
       // Zero rows is ambiguous: a genuinely new account, or an account whose rows
       // could not be read — a paused project, a spend cap, a policy change. Seeding
@@ -3853,7 +3872,31 @@ function renderPane(){
     goals: paneGoals, txns: paneTxns, import: paneImport,
     schedule: paneSchedule, data: paneData
   }[state.tab];
+  const ob = offlineBanner();
+  if (ob) host.appendChild(ob);
   host.appendChild(fn ? fn() : el("div"));
+}
+
+/**
+ * The cloud was configured and could not be read. Everything still works against
+ * this browser's copy, but edits are NOT reaching the account — saying so loudly is
+ * the difference between a safe fallback and a silently diverging second budget.
+ */
+function offlineBanner(){
+  if (!store.cloudError) return null;
+  const b = el("div", "banner warn");
+  const t = el("div", "sp");
+  t.appendChild(el("b", "", "Working from this browser's copy. "));
+  t.appendChild(document.createTextNode(
+    "Your account could not be reached (" + store.cloudError + "), so this is the last " +
+    "version saved on this device. Changes you make now stay here and will NOT reach your " +
+    "account. Download a backup before you do anything else."));
+  b.appendChild(t);
+  const dl = el("button", "btn sm primary", "Download backup");
+  dl.type = "button";
+  dl.addEventListener("click", doExport);
+  b.appendChild(dl);
+  return b;
 }
 
 function sampleBanner(){
