@@ -177,6 +177,13 @@ button{font:inherit; color:inherit}
   display:flex; align-items:center; justify-content:center; padding:0;
 }
 .xbtn:hover{background:var(--neg-soft); color:var(--neg)}
+/* a cell whose figure came from a sum — the corner mark is the only hint needed */
+.gc.hasexpr{position:relative}
+.gc.hasexpr::after{
+  content:""; position:absolute; top:3px; right:3px; width:0; height:0;
+  border-top:5px solid var(--accent); border-left:5px solid transparent; opacity:.75;
+  pointer-events:none;
+}
 .cbtn{
   appearance:none; border:0; background:none; color:var(--faint); cursor:pointer;
   width:26px; height:26px; border-radius:4px; font-size:13px; line-height:1;
@@ -1126,6 +1133,7 @@ const state = {
   activeMonth: monthKey(todayISO()),
   budgetMonth: monthKey(todayISO()),
   importDraft: {},
+  exprs: {},           // input id -> the sum someone typed, kept so it can be edited
   tab: "dashboard",
   sampleData: false
 };
@@ -1624,6 +1632,53 @@ function setIncomeOverride(mk, recId, occDate, cents){
   else m.incomeOverrides[k] = Math.abs(cents);
   if (!Object.keys(m.incomeOverrides).length) delete m.incomeOverrides;
   persistBudget(mk);
+}
+
+/* ---------- running sums, kept ----------
+ * "451+413+237" is three shopping trips. Storing only 1101 throws away the
+ * question someone will actually ask next month — which trip was which, and
+ * where do I add the fourth. So the text is kept beside the figure and handed
+ * back whenever the cell is opened for editing.
+ *
+ * The figure, never the text, remains the truth. If anything changes the amount
+ * by another route — copying last month, the overage dialog moving money out —
+ * the stored sum no longer adds up to it and is dropped on the spot, because a
+ * breakdown that disagrees with its own total is worse than none.
+ */
+function looksLikeSum(text){
+  return typeof text === "string" && /[0-9)]\s*[+\-]\s*[^\s+\-]/.test(text.trim());
+}
+
+/** The sum behind a cell, but only while it still adds up to what is stored. */
+function exprFor(id, cents){
+  const e = state.exprs && state.exprs[id];
+  if (!e) return null;
+  if (toCents(e) !== cents){ delete state.exprs[id]; return null; }
+  return e;
+}
+
+function setExpr(id, text, cents){
+  if (!state.exprs) state.exprs = {};
+  const had = state.exprs[id];
+  if (looksLikeSum(text) && toCents(text) === cents) state.exprs[id] = String(text).trim();
+  else delete state.exprs[id];
+  if (had !== state.exprs[id]) persistCore("exprs");
+}
+
+/** The parts of a sum, for a tooltip. */
+function exprParts(e){
+  const out = [];
+  let sign = 1, term = "";
+  const str = String(e);
+  for (let i = 0; i < str.length; i++){
+    const c = str[i];
+    if ((c === "+" || c === "-") && /[0-9)]\s*$/.test(term)){
+      out.push(sign * toCents(term)); sign = (c === "-") ? -1 : 1; term = ""; continue;
+    }
+    term += c;
+  }
+  if (term.trim()) out.push(sign * toCents(term));
+  return out;
 }
 
 function budgetParticipatingCash(){
@@ -3294,6 +3349,7 @@ async function sbLoadAll(){
       else if (id === "categories")  state.categories  = d.items || [];
       else if (id === "recurrences") state.recurrences = d.items || [];
       else if (id === "goals")       state.goals       = d.items || [];
+      else if (id === "expressions")  state.exprs       = d.exprs || {};
     } else if (coll === "txns"){
       state.txMonths[id] = d.items || [];
     } else if (coll === "budget"){
@@ -3543,7 +3599,8 @@ function docPaths(){
     accounts:    "core/accounts",
     categories:  "core/categories",
     recurrences: "core/recurrences",
-    goals:       "core/goals"
+    goals:       "core/goals",
+    exprs:       "core/expressions"
   };
 }
 
@@ -3554,7 +3611,8 @@ function persistCore(which){
     accounts:    () => ({v: SCHEMA_VERSION, items: state.accounts}),
     categories:  () => ({v: SCHEMA_VERSION, items: state.categories}),
     recurrences: () => ({v: SCHEMA_VERSION, items: state.recurrences}),
-    goals:       () => ({v: SCHEMA_VERSION, items: state.goals})
+    goals:       () => ({v: SCHEMA_VERSION, items: state.goals}),
+    exprs:       () => ({v: SCHEMA_VERSION, exprs: state.exprs || {}})
   };
   if (which) queueWrite(p[which], map[which]());
   else for (const k of Object.keys(map)) queueWrite(p[k], map[k]());
@@ -3636,6 +3694,10 @@ async function loadAll(){
       if (c.exists) state.categories = c.data().items || [];
       if (r.exists) state.recurrences = r.data().items || [];
       if (g.exists) state.goals = g.data().items || [];
+      try {
+        const x = await db.doc(p.exprs).get();
+        if (x.exists) state.exprs = x.data().exprs || {};
+      } catch (e){ state.exprs = state.exprs || {}; }
       state.sampleData = !!(state.settings && state.settings.sampleData);
       const anyDoc = s.exists || a.exists || c.exists || r.exists || g.exists;
       if (!anyDoc) await seedFirstRun();
@@ -3713,6 +3775,7 @@ function exportPayload(){
     categories: state.categories,
     recurrences: state.recurrences,
     goals: state.goals,
+    exprs: state.exprs || {},
     transactions: state.txMonths,
     budgetMonths: state.budgetMonths
   };
@@ -3725,6 +3788,7 @@ function applyPayload(p){
   state.categories  = p.categories || [];
   state.recurrences = p.recurrences || [];
   state.goals       = p.goals || [];
+  state.exprs       = p.exprs || {};
   state.txMonths    = p.transactions || {};
   state.budgetMonths = p.budgetMonths || {};
   state.sampleData  = !!state.settings.sampleData;
@@ -3996,6 +4060,7 @@ function cellInput(item, field, kind, onCommit, attrs){
   const c = el("div", "gc");
   const i = el("input");
   const a = attrs || {};
+  let last = "";
   i.id = "f-" + (item.id || "new") + "-" + field;
   if (kind === "money"){
     i.className = "money"; i.type = "text"; i.inputMode = "decimal";
@@ -4003,6 +4068,20 @@ function cellInput(item, field, kind, onCommit, attrs){
     // next pass through the cell re-commit it with the sign flipped.
     i.value = item[field] ? (a.signed ? fromCents(item[field]) : fromCents(Math.abs(item[field]))) : "";
     i.placeholder = "0.00";
+    // At rest the cell shows the total; opening it hands back the sum that made it.
+    const held = exprFor(i.id, item[field] || 0);
+    if (held){
+      c.classList.add("hasexpr");
+      const parts = exprParts(held);
+      i.title = held + "\n" + parts.map(v => money(v)).join("\n") +
+                "\n= " + money(parts.reduce((x, y) => x + y, 0));
+    }
+    i.addEventListener("focus", () => {
+      const e = exprFor(i.id, item[field] || 0);
+      if (e && i.value !== e){ i.value = e; last = e; }
+      // select-all so typing replaces, but a click still lands a caret
+      setTimeout(() => { try { i.select(); } catch (err){ /* not focusable yet */ } }, 0);
+    });
   } else if (kind === "date"){
     i.className = "date"; i.type = "date";
     i.value = item[field] || "";
@@ -4020,11 +4099,14 @@ function cellInput(item, field, kind, onCommit, attrs){
   // Commit only when the value actually changed. `change` and `blur` both fire on the
   // way out of a cell, and an unguarded handler would commit twice per edit — and once
   // more every time you merely tab through a cell you never touched.
-  let last = i.value;
+  last = i.value;
   const commit = () => {
     if (i.value === last) return;
-    last = i.value;
-    onCommit(i.value, i);
+    const typed = i.value;
+    last = typed;
+    onCommit(typed, i);
+    // after the handler, so the figure it stored is what the sum is checked against
+    if (kind === "money") setExpr(i.id, typed, toCents(typed));
   };
   i.addEventListener("change", commit);
   i.addEventListener("blur", commit);
@@ -6796,6 +6878,7 @@ function clearAll(){
   state.settings = blankSettings();
   state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
   state.txMonths = {}; state.txMonths[state.activeMonth] = [];
+  state.exprs = {};
   // Budget months were being left behind, so a "cleared" budget still carried every
   // envelope figure the moment anything re-read them.
   const hadBudget = Object.keys(state.budgetMonths);
