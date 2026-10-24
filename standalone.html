@@ -614,25 +614,78 @@ const DAY = 86400000;
  * Only an operator BETWEEN two numbers splits. A leading minus, a trailing minus and
  * parentheses all still mean "negative", which they have to, or "-50" would break.
  */
-function toCents(v){
-  if (typeof v === "string" && /[0-9)]\s*[+\-]\s*[^\s+\-]/.test(v.trim())){
-    const s = v.trim();
-    let total = 0, sign = 1, term = "", seen = false;
-    for (let i = 0; i < s.length; i++){
-      const c = s[i];
-      const isOp = (c === "+" || c === "-") && /[0-9)]\s*$/.test(term);
-      if (isOp){
-        total += sign * oneAmountToCents(term);
-        seen = true;
-        sign = (c === "-") ? -1 : 1;
-        term = "";
-        continue;
-      }
-      term += c;
+/**
+ * Money fields take a formula, the way a spreadsheet does: "=123+123", or just
+ * "123+123" without the equals. Multiplication and division bind tighter than
+ * addition, so "=4*12.50+10" is 60, not 50 times anything.
+ *
+ * A leading "=" is the explicit signal "this is a formula" — it is kept even for a
+ * single term, so "=123" is still remembered as a formula and reopens as one. That
+ * is what makes the cell behave like Excel rather than like a text box that happens
+ * to do sums.
+ *
+ * Splitting lives here rather than at each call site so every amount in the app —
+ * Actual, Budgeted, an opening balance — behaves identically.
+ */
+function isFormula(text){
+  if (typeof text !== "string") return false;
+  const t = text.trim();
+  if (!t) return false;
+  if (t.charAt(0) === "=") return true;
+  return /[0-9)]\s*[+\-*/]\s*[^\s+\-*/]/.test(t);   // an operator BETWEEN two values
+}
+
+/** Evaluate a formula to cents, or null when it is not one / does not parse. */
+function evalFormula(text){
+  if (!isFormula(text)) return null;
+  let t = String(text).trim();
+  if (t.charAt(0) === "=") t = t.slice(1);
+  if (!t.trim()) return null;
+
+  // split on + and -, keeping the sign, then fold each term's * and /
+  const terms = [];
+  let sign = 1, cur = "", seen = false;
+  for (let i = 0; i < t.length; i++){
+    const ch = t[i];
+    if ((ch === "+" || ch === "-") && /[0-9)%]\s*$/.test(cur)){
+      terms.push({sign: sign, text: cur});
+      sign = (ch === "-") ? -1 : 1; cur = ""; seen = true; continue;
     }
-    if (term.trim()) total += sign * oneAmountToCents(term);
-    else if (!seen) return oneAmountToCents(s);
-    return total;
+    cur += ch;
+  }
+  if (cur.trim()) terms.push({sign: sign, text: cur});
+  else if (!seen && !terms.length) return null;
+  if (!terms.length) return null;
+
+  let total = 0;
+  for (const term of terms){
+    // a term is value (* or /) value (* or /) …, evaluated left to right
+    const bits = term.text.split(/([*/])/);
+    let acc = oneAmountToCents(bits[0]) / 100;         // work in dollars, round once
+    if (!/\d/.test(bits[0])) return null;
+    for (let k = 1; k < bits.length; k += 2){
+      const op = bits[k], raw = bits[k + 1];
+      if (raw == null || !/\d/.test(raw)) return null;
+      const v = oneAmountToCents(raw) / 100;
+      if (op === "*") acc = acc * v;
+      else {
+        if (!v) return null;                           // never divide by zero
+        acc = acc / v;
+      }
+    }
+    if (!Number.isFinite(acc)) return null;
+    total += term.sign * acc;
+  }
+  const cents = Math.round(total * 100);
+  return Number.isFinite(cents) ? cents : null;
+}
+
+function toCents(v){
+  if (typeof v === "string" && isFormula(v)){
+    const c = evalFormula(v);
+    if (c !== null) return c;
+    // not a formula after all (a stray "=", say) — fall through and read it plainly
+    return oneAmountToCents(String(v).replace(/^=/, ""));
   }
   return oneAmountToCents(v);
 }
@@ -1089,6 +1142,27 @@ function runFixtures(){
   t("Money", "a sum is not confused by a leading minus", toCents("-10+4"), -600);
   t("Money", "trailing operator is ignored", toCents("40+"), 4000);
   t("Money", "$ signs and spaces survive a sum", toCents("$12.50 + $8.75"), 2125);
+
+  // --- spreadsheet formulas ---
+  t("Formula", "leading = still sums", toCents("=123+123"), 24600);
+  t("Formula", "= with spaces", toCents("= 123 + 123"), 24600);
+  t("Formula", "= on a single value", toCents("=123"), 12300);
+  t("Formula", "= is a formula even alone", isFormula("=123"), true,
+    "so it is remembered and reopens as a formula, like a spreadsheet");
+  t("Formula", "a bare number is not", isFormula("123"), false);
+  t("Formula", "multiply", toCents("=4*12.50"), 5000);
+  t("Formula", "divide", toCents("=100/4"), 2500);
+  t("Formula", "times binds tighter than plus", toCents("=4*12.50+10"), 6000);
+  t("Formula", "…on the right too", toCents("=10+4*12.50"), 6000);
+  t("Formula", "minus a product", toCents("=100-2*15"), 7000);
+  t("Formula", "chained", toCents("=2*3*4"), 2400);
+  t("Formula", "grouped numbers inside a formula", toCents("=1,200.50+300"), 150050);
+  t("Formula", "divide by zero is refused", evalFormula("=10/0"), null);
+  t("Formula", "a lone = is not a formula", toCents("="), 0);
+  t("Formula", "=abc parses to nothing", toCents("=abc"), 0);
+  t("Formula", "rounding happens once at the end", toCents("=10/3"), 333);
+  t("Formula", "negatives still work", toCents("-50"), -5000);
+  t("Formula", "parentheses are still negative", toCents("(50)"), -5000);
   t("Monthly equivalent", "$100 semi-monthly is exactly $200", perMonth(10000, "SEMIMONTHLY"), 20000);
   t("Monthly equivalent", "$600 quarterly is $200", perMonth(60000, "QUARTERLY"), 20000);
   t("Monthly equivalent", "$649 semi-annual", perMonth(64900, "SEMIANNUAL"), 10817);
@@ -1646,7 +1720,7 @@ function setIncomeOverride(mk, recId, occDate, cents){
  * breakdown that disagrees with its own total is worse than none.
  */
 function looksLikeSum(text){
-  return typeof text === "string" && /[0-9)]\s*[+\-]\s*[^\s+\-]/.test(text.trim());
+  return isFormula(text);
 }
 
 /** The sum behind a cell, but only while it still adds up to what is stored. */
@@ -1665,20 +1739,24 @@ function setExpr(id, text, cents){
   if (had !== state.exprs[id]) persistCore("exprs");
 }
 
-/** The parts of a sum, for a tooltip. */
+/** The parts of a formula, for the tooltip. */
 function exprParts(e){
+  let t = String(e).trim();
+  if (t.charAt(0) === "=") t = t.slice(1);
   const out = [];
-  let sign = 1, term = "";
-  const str = String(e);
-  for (let i = 0; i < str.length; i++){
-    const c = str[i];
-    if ((c === "+" || c === "-") && /[0-9)]\s*$/.test(term)){
-      out.push(sign * toCents(term)); sign = (c === "-") ? -1 : 1; term = ""; continue;
+  let sign = 1, cur = "";
+  for (let i = 0; i < t.length; i++){
+    const ch = t[i];
+    if ((ch === "+" || ch === "-") && /[0-9)%]\s*$/.test(cur)){
+      out.push({sign: sign, text: cur.trim()}); sign = (ch === "-") ? -1 : 1; cur = ""; continue;
     }
-    term += c;
+    cur += ch;
   }
-  if (term.trim()) out.push(sign * toCents(term));
-  return out;
+  if (cur.trim()) out.push({sign: sign, text: cur.trim()});
+  return out.map(p => ({text: (p.sign < 0 ? "-" : "") + p.text,
+                        cents: p.sign * (evalFormula("=" + p.text) !== null
+                                         ? evalFormula("=" + p.text)
+                                         : oneAmountToCents(p.text))}));
 }
 
 function budgetParticipatingCash(){
@@ -4061,6 +4139,7 @@ function cellInput(item, field, kind, onCommit, attrs){
   const i = el("input");
   const a = attrs || {};
   let last = "";
+  let restoreAtRest = null;
   i.id = "f-" + (item.id || "new") + "-" + field;
   if (kind === "money"){
     i.className = "money"; i.type = "text"; i.inputMode = "decimal";
@@ -4068,20 +4147,30 @@ function cellInput(item, field, kind, onCommit, attrs){
     // next pass through the cell re-commit it with the sign flipped.
     i.value = item[field] ? (a.signed ? fromCents(item[field]) : fromCents(Math.abs(item[field]))) : "";
     i.placeholder = "0.00";
-    // At rest the cell shows the total; opening it hands back the sum that made it.
+    // At rest the cell shows the total; opening it hands back the formula that made it.
+    const rest = i.value;
     const held = exprFor(i.id, item[field] || 0);
     if (held){
       c.classList.add("hasexpr");
       const parts = exprParts(held);
-      i.title = held + "\n" + parts.map(v => money(v)).join("\n") +
-                "\n= " + money(parts.reduce((x, y) => x + y, 0));
+      i.title = held + "\n" + parts.map(x => x.text + "  =  " + money(x.cents)).join("\n") +
+                "\ntotal  " + money(parts.reduce((x, y) => x + y.cents, 0));
     }
     i.addEventListener("focus", () => {
       const e = exprFor(i.id, item[field] || 0);
       if (e && i.value !== e){ i.value = e; last = e; }
-      // select-all so typing replaces, but a click still lands a caret
       setTimeout(() => { try { i.select(); } catch (err){ /* not focusable yet */ } }, 0);
     });
+    // Leaving a cell untouched must put the total back on screen. This is attached
+    // AFTER the commit handler below, deliberately: restoring first would make the
+    // committer see a changed value and save the total over the formula, so clicking
+    // in and straight out again would silently destroy it.
+    restoreAtRest = () => {
+      if (i.value === last && exprFor(i.id, item[field] || 0)){
+        i.value = rest;
+        last = rest;
+      }
+    };
   } else if (kind === "date"){
     i.className = "date"; i.type = "date";
     i.value = item[field] || "";
@@ -4110,6 +4199,7 @@ function cellInput(item, field, kind, onCommit, attrs){
   };
   i.addEventListener("change", commit);
   i.addEventListener("blur", commit);
+  if (restoreAtRest) i.addEventListener("blur", restoreAtRest);
   i.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); i.blur(); } });
   c.appendChild(i);
   return c;
