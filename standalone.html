@@ -394,6 +394,21 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .opt .btn{margin:0 6px 0 0}
 .modal .foot{display:flex; gap:8px; justify-content:flex-end; margin-top:12px}
 
+.opbar{
+  position:fixed; left:0; right:0; bottom:0; z-index:90; display:none;
+  gap:6px; padding:7px 9px calc(7px + env(safe-area-inset-bottom));
+  background:var(--surface); border-top:1px solid var(--line-2);
+  box-shadow:0 -4px 14px rgba(0,0,0,.14);
+}
+.opbar.on{display:flex}
+.opk{
+  flex:1; min-height:42px; font-family:var(--font-mono); font-size:19px;
+  color:var(--ink); background:var(--bg); border:1px solid var(--line);
+  border-radius:8px; cursor:pointer; touch-action:manipulation;
+}
+.opk:active{background:var(--line)}
+.opdone{flex:1.4; font-family:var(--font-ui); font-size:14px; font-weight:600}
+
 .tbbwhy{margin-top:9px}
 .tbbwhy > summary{
   cursor:pointer; font-family:var(--font-ui); font-size:11.5px; color:var(--ink-2);
@@ -1779,6 +1794,70 @@ function exprParts(e){
                         cents: p.sign * (evalFormula("=" + p.text) !== null
                                          ? evalFormula("=" + p.text)
                                          : oneAmountToCents(p.text))}));
+}
+
+/* ---------- the operator bar ----------
+ * A phone shows the number pad for inputMode "decimal", and that pad has no
+ * = + - * / on it at all. So a formula is simply untypeable on a phone, however
+ * well the evaluator works. This puts the five missing keys on screen whenever a
+ * money cell is open on a touch device, just above the keyboard.
+ *
+ * mousedown/touchstart are cancelled so the tap never steals focus: losing focus
+ * would close the cell, put the total back, and throw away what was being typed.
+ */
+let opbar = null;
+function isTouch(){
+  try { return window.matchMedia && window.matchMedia("(pointer: coarse)").matches; }
+  catch (e){ return false; }
+}
+function opBar(){
+  if (opbar) return opbar;
+  opbar = el("div", "opbar");
+  const keys = [["=", "="], ["+", "+"], ["\u2212", "-"], ["\u00d7", "*"], ["\u00f7", "/"]];
+  for (const k of keys){
+    const b = el("button", "opk", k[0]);
+    b.type = "button";
+    b.dataset.ins = k[1];
+    opbar.appendChild(b);
+  }
+  const done = el("button", "opk opdone", "Done");
+  done.type = "button";
+  opbar.appendChild(done);
+
+  const hold = (ev) => ev.preventDefault();          // keep the caret where it is
+  opbar.addEventListener("mousedown", hold);
+  opbar.addEventListener("touchstart", hold, {passive: false});
+  opbar.addEventListener("click", (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest(".opk") : null;
+    if (!b) return;
+    const i = opbar._target;
+    if (!i) return;
+    if (b === done){ hideOpBar(); try { i.blur(); } catch (e){} return; }
+    const ins = b.dataset.ins;
+    // "=" only ever belongs at the very front, the way a spreadsheet reads it
+    if (ins === "=" ){
+      if (i.value.charAt(0) !== "=") i.value = "=" + i.value;
+      try { i.setSelectionRange(i.value.length, i.value.length); } catch (e){}
+    } else {
+      try {
+        const a = i.selectionStart, z = i.selectionEnd;
+        i.value = i.value.slice(0, a) + ins + i.value.slice(z);
+        i.setSelectionRange(a + 1, a + 1);
+      } catch (e){ i.value += ins; }
+    }
+    try { i.focus(); } catch (e){}
+  });
+  document.body.appendChild(opbar);
+  return opbar;
+}
+function showOpBar(i){
+  if (!isTouch()) return;
+  const bar = opBar();
+  bar._target = i;
+  bar.classList.add("on");
+}
+function hideOpBar(){
+  if (opbar){ opbar.classList.remove("on"); opbar._target = null; }
 }
 
 function budgetParticipatingCash(){
@@ -4182,7 +4261,9 @@ function cellInput(item, field, kind, onCommit, attrs){
       const e = exprFor(i.id, item[field] || 0);
       if (e && i.value !== e){ i.value = e; last = e; }
       setTimeout(() => { try { i.select(); } catch (err){ /* not focusable yet */ } }, 0);
+      showOpBar(i);
     });
+    i.addEventListener("blur", () => { if (opbar && opbar._target === i) hideOpBar(); });
     // Leaving a cell untouched must put the total back on screen. This is attached
     // AFTER the commit handler below, deliberately: restoring first would make the
     // committer see a changed value and save the total over the formula, so clicking

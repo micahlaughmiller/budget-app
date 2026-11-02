@@ -1,0 +1,6637 @@
+
+function Node(t){ this.tag=t; this.children=[]; this.textContent=''; this.className='';
+  this.style={}; this.parentNode=null; this.attrs={}; this.value=''; this.hidden=true; }
+Node.prototype.appendChild=function(c){ this.children.push(c); c.parentNode=this; return c; };
+Node.prototype.removeChild=function(c){ this.children=this.children.filter(x=>x!==c); };
+Node.prototype.addEventListener=function(k,f){ (this.ev=this.ev||{})[k]=f; };
+Node.prototype.setAttribute=function(k,v){ this.attrs[k]=v; };
+Node.prototype.getAttribute=function(k){ return this.attrs[k]; };
+Node.prototype.insertBefore=function(c){ this.children.push(c); return c; };
+Node.prototype.querySelector=function(){ return new Node('div'); };
+globalThis.__els={}; globalThis.__ls={};
+globalThis.window={claude:undefined,matchMedia:()=>({matches:false}),supabase:undefined,
+  scrollTo(){},scrollY:0,location:{href:'file:///x.html',hash:'',search:''},
+  history:{replaceState(){}}};
+globalThis.localStorage={getItem:(k)=>(k in globalThis.__ls?globalThis.__ls[k]:null),
+  setItem:(k,v)=>{globalThis.__ls[k]=String(v);},removeItem:(k)=>{delete globalThis.__ls[k];}};
+globalThis.document={documentElement:{setAttribute(){},getAttribute:()=>null},
+  getElementById:(id)=>(globalThis.__els[id]||(globalThis.__els[id]=new Node('div'))),
+  querySelector:()=>new Node('div'),querySelectorAll:()=>[],activeElement:null,
+  createElement:(t)=>new Node(t),
+  createTextNode:(t)=>{const n=new Node('#text');n.textContent=t;return n;},
+  addEventListener(){},removeEventListener(){},body:new Node('body')};
+globalThis.location=globalThis.window.location;
+globalThis.history=globalThis.window.history;
+globalThis.navigator={clipboard:{writeText:async()=>{}}};
+globalThis.alert=()=>{};globalThis.confirm=()=>true;
+globalThis.requestAnimationFrame=(f)=>setTimeout(f,0);
+globalThis.performance={now:()=>Date.now()};
+"use strict";
+
+/* ============================================================
+   1. PRIMITIVES — money, dates, frequency
+   ============================================================ */
+
+const DAY = 86400000;
+
+/**
+ * Dollars -> integer cents, parsed from the DIGITS rather than through a float.
+ * parseFloat("0.145") * 100 is 14.499999999999998, so rounding it gives 14 cents
+ * instead of 15. Typing tolerates that; importing thousands of rows does not.
+ * Handles $ signs, thousands separators, parentheses negatives and a trailing minus.
+ */
+/**
+ * Money fields accept a running sum: "12.50+8.75+30" is three receipts, not a typo.
+ * Splitting happens here rather than at each call site so every amount in the app —
+ * Actual, Budgeted, an opening balance — behaves the same way.
+ *
+ * Only an operator BETWEEN two numbers splits. A leading minus, a trailing minus and
+ * parentheses all still mean "negative", which they have to, or "-50" would break.
+ */
+/**
+ * Money fields take a formula, the way a spreadsheet does: "=123+123", or just
+ * "123+123" without the equals. Multiplication and division bind tighter than
+ * addition, so "=4*12.50+10" is 60, not 50 times anything.
+ *
+ * A leading "=" is the explicit signal "this is a formula" — it is kept even for a
+ * single term, so "=123" is still remembered as a formula and reopens as one. That
+ * is what makes the cell behave like Excel rather than like a text box that happens
+ * to do sums.
+ *
+ * Splitting lives here rather than at each call site so every amount in the app —
+ * Actual, Budgeted, an opening balance — behaves identically.
+ */
+function isFormula(text){
+  if (typeof text !== "string") return false;
+  const t = text.trim();
+  if (!t) return false;
+  if (t.charAt(0) === "=") return true;
+  return /[0-9)]\s*[+\-*/]\s*[^\s+\-*/]/.test(t);   // an operator BETWEEN two values
+}
+
+/** Evaluate a formula to cents, or null when it is not one / does not parse. */
+function evalFormula(text){
+  if (!isFormula(text)) return null;
+  let t = String(text).trim();
+  if (t.charAt(0) === "=") t = t.slice(1);
+  if (!t.trim()) return null;
+
+  // split on + and -, keeping the sign, then fold each term's * and /
+  const terms = [];
+  let sign = 1, cur = "", seen = false;
+  for (let i = 0; i < t.length; i++){
+    const ch = t[i];
+    if ((ch === "+" || ch === "-") && /[0-9)%]\s*$/.test(cur)){
+      terms.push({sign: sign, text: cur});
+      sign = (ch === "-") ? -1 : 1; cur = ""; seen = true; continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) terms.push({sign: sign, text: cur});
+  else if (!seen && !terms.length) return null;
+  if (!terms.length) return null;
+
+  let total = 0;
+  for (const term of terms){
+    // a term is value (* or /) value (* or /) …, evaluated left to right
+    const bits = term.text.split(/([*/])/);
+    let acc = oneAmountToCents(bits[0]) / 100;         // work in dollars, round once
+    if (!/\d/.test(bits[0])) return null;
+    for (let k = 1; k < bits.length; k += 2){
+      const op = bits[k], raw = bits[k + 1];
+      if (raw == null || !/\d/.test(raw)) return null;
+      const v = oneAmountToCents(raw) / 100;
+      if (op === "*") acc = acc * v;
+      else {
+        if (!v) return null;                           // never divide by zero
+        acc = acc / v;
+      }
+    }
+    if (!Number.isFinite(acc)) return null;
+    total += term.sign * acc;
+  }
+  const cents = Math.round(total * 100);
+  return Number.isFinite(cents) ? cents : null;
+}
+
+function toCents(v){
+  if (typeof v === "string" && isFormula(v)){
+    const c = evalFormula(v);
+    if (c !== null) return c;
+    // not a formula after all (a stray "=", say) — fall through and read it plainly
+    return oneAmountToCents(String(v).replace(/^=/, ""));
+  }
+  return oneAmountToCents(v);
+}
+
+function oneAmountToCents(v){
+  if (v === "" || v == null) return 0;
+  if (typeof v === "number") return Math.round(v * 100);
+  let s = String(v).trim();
+  if (!s) return 0;
+  let neg = false;
+  if (/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1, -1); }
+  if (/-\s*$/.test(s)){ neg = true; s = s.replace(/-\s*$/, ""); }
+  s = s.replace(/[^0-9.,\-]/g, "");
+  if (s.indexOf("-") === 0){ neg = true; }
+  s = s.replace(/-/g, "");
+  // Decide whether the last separator is a decimal point or a thousands separator.
+  // 1-2 trailing digits is always a decimal; 3 is grouping after a comma ("1,234") but a
+  // decimal after a period ("0.145"); 4+ is always a decimal.
+  const m = s.match(/^(.*?)([.,])(\d+)$/);
+  let whole = s, fracDigits = "";
+  if (m){
+    const sep = m[2], f = m[3];
+    const isDecimal = f.length <= 2 || f.length >= 4 || sep === ".";
+    if (isDecimal){ whole = m[1]; fracDigits = f; }
+  }
+  whole = whole.replace(/[.,]/g, "");
+  if (!whole) whole = "0";
+  if (!/^\d+$/.test(whole)) return 0;
+
+  let cents = parseInt(whole, 10) * 100;
+  if (fracDigits){
+    const den = Math.pow(10, fracDigits.length);
+    cents += Math.floor(parseInt(fracDigits, 10) * 100 / den + 0.5);   // half-up
+  }
+  if (!Number.isFinite(cents)) return 0;
+  return neg ? -cents : cents;
+}
+function fromCents(c){ return (c / 100).toFixed(2); }
+function money(c, opts){
+  const o = opts || {};
+  const neg = c < 0;
+  const s = "$" + Math.abs(c / 100).toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+  if (o.sign && c > 0) return "+" + s;
+  return neg ? "-" + s : s;
+}
+function money0(c){
+  const neg = c < 0;
+  const s = "$" + Math.abs(Math.round(c / 100)).toLocaleString("en-US");
+  return neg ? "-" + s : s;
+}
+
+function todayISO(){
+  const d = new Date();
+  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,"0"), String(d.getDate()).padStart(2,"0")].join("-");
+}
+function monthKey(iso){ return (iso || todayISO()).slice(0, 7); }
+function monthLabel(key){
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString("en-US", {month:"long", year:"numeric"});
+}
+function shiftMonth(key, delta){
+  let [y, m] = key.split("-").map(Number);
+  m += delta;
+  y += Math.floor((m - 1) / 12);
+  m = ((m - 1) % 12 + 12) % 12 + 1;
+  return y + "-" + String(m).padStart(2, "0");
+}
+
+/**
+ * Frequencies. `perYear` drives every monthly-equivalent in the app.
+ * The legacy workbook used (x/7)*30 for weekly and (x/90)*30 for quarterly,
+ * which disagreed with its own other sheet and ran ~5% low. These are exact.
+ * NOTE: monthly equivalents are for BUFFER SIZING AND REPORTING ONLY.
+ * The M3 simulator is event-driven off real dates and never sees them.
+ */
+const FREQ = {
+  DAILY:          {label:"Daily",            perYear:365.25},
+  WEEKLY:         {label:"Weekly",           perYear:52},
+  BIWEEKLY:       {label:"Bi-Weekly",        perYear:26},
+  SEMIMONTHLY:    {label:"Semi-Monthly",     perYear:24},
+  MONTHLY:        {label:"Monthly",          perYear:12},
+  BIMONTHLY:      {label:"Every 2 Months",   perYear:6},
+  QUARTERLY:      {label:"Quarterly",        perYear:4},
+  SEMIANNUAL:     {label:"Semi-Annual",      perYear:2},
+  ANNUAL:         {label:"Yearly",           perYear:1},
+  EVERY_N_DAYS:   {label:"Every N days",     perYear:0, interval:true},
+  EVERY_N_WEEKS:  {label:"Every N weeks",    perYear:0, interval:true},
+  EVERY_N_MONTHS: {label:"Every N months",   perYear:0, interval:true},
+  ONETIME:        {label:"One Time",         perYear:0}
+};
+const FREQ_KEYS = Object.keys(FREQ);
+
+/**
+ * What a row is actually worth on a given date, once a yearly raise is applied.
+ * The raise compounds on each anniversary of the anchor, so a 3% raise anchored
+ * 9 Oct 2026 pays the old figure through 8 Oct 2027 and the new one from the 9th.
+ * Every place that posts, plans or reports an amount goes through here, or the
+ * graph and the budget would quietly disagree with each other.
+ */
+function amountOn(rec, dateISO){
+  const base = Math.abs(rec.amount_c || 0);
+  const pct = Number(rec.annualRaisePct || 0);
+  if (!pct || !base || !dateISO) return base;
+  const from = rec.raiseStart || rec.anchorDate;
+  if (!from || dateISO < from) return base;
+  // whole anniversaries elapsed — never partial, a raise lands on a date
+  const a = from.split("-").map(Number), b = dateISO.split("-").map(Number);
+  let yrs = b[0] - a[0];
+  if (b[1] < a[1] || (b[1] === a[1] && b[2] < a[2])) yrs--;
+  if (yrs <= 0) return base;
+  if (yrs > 100) yrs = 100;                      // a guard, not a policy
+  return Math.round(base * Math.pow(1 + pct / 100, yrs));
+}
+
+/** Monthly-equivalent of a recurring amount, in cents. One-time contributes 0. */
+function perMonth(cents, freq, n){
+  const f = FREQ[freq];
+  if (!f) return 0;
+  if (f.interval){
+    const k = Math.max(1, n || 1);
+    if (freq === "EVERY_N_DAYS")   return Math.round(cents * (365.25 / k) / 12);
+    if (freq === "EVERY_N_WEEKS")  return Math.round(cents * (52 / k) / 12);
+    if (freq === "EVERY_N_MONTHS") return Math.round(cents / k);
+  }
+  if (!f.perYear) return 0;
+  return Math.round(cents * f.perYear / 12);
+}
+
+/* ============================================================
+   1b. RECURRENCE ENGINE (M2)
+   Occurrences are computed from the ANCHOR by index, never chained from the
+   previous date. That single choice is what stops month-end drift: the legacy
+   workbook chained, so a bill on the 31st hit Excel's DATE(y, 2, 31) -> Mar 3
+   and then permanently re-anchored to the 3rd.
+   ============================================================ */
+
+function ymd(s){ const p = String(s).split("-"); return {y:+p[0], m:+p[1], d:+p[2]}; }
+function isoOf(y, m, d){ return y + "-" + String(m).padStart(2,"0") + "-" + String(d).padStart(2,"0"); }
+/** Overflow-normalizing constructor — the same arithmetic Excel's DATE() does. */
+function normISO(y, m, d){
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return isoOf(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+}
+function daysInMonth(y, m){ return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+function addDays(s, n){ const a = ymd(s); return normISO(a.y, a.m, a.d + n); }
+function dow(s){ const a = ymd(s); return new Date(Date.UTC(a.y, a.m - 1, a.d)).getUTCDay(); } // 0=Sun
+function diffDays(a, b){
+  const x = ymd(a), y = ymd(b);
+  return Math.round((Date.UTC(y.y, y.m-1, y.d) - Date.UTC(x.y, x.m-1, x.d)) / DAY);
+}
+function shortDate(s){
+  if (!s) return "—";
+  const a = ymd(s);
+  return new Date(Date.UTC(a.y, a.m-1, a.d)).toLocaleDateString("en-US",
+    {month:"short", day:"numeric", year:"2-digit", timeZone:"UTC"});
+}
+/** Full year — for prose, where "Jul 7, 31" reads as a day of the month. */
+function longDate(s){
+  if (!s) return "—";
+  const a = ymd(s);
+  return new Date(Date.UTC(a.y, a.m-1, a.d)).toLocaleDateString("en-US",
+    {month:"short", day:"numeric", year:"numeric", timeZone:"UTC"});
+}
+
+/** nth weekday of a month; n = 1..5, or -1 for the last one. */
+function nthWeekday(y, m, weekday, n){
+  if (n > 0){
+    const first = dow(isoOf(y, m, 1));
+    return isoOf(y, m, 1 + ((weekday - first + 7) % 7) + (n - 1) * 7);
+  }
+  const dim = daysInMonth(y, m);
+  const last = dow(isoOf(y, m, dim));
+  return isoOf(y, m, dim - ((last - weekday + 7) % 7));
+}
+
+/** US federal holidays plus their observed days. */
+function usHolidays(y){
+  const raw = [
+    isoOf(y,1,1), nthWeekday(y,1,1,3), nthWeekday(y,2,1,3), nthWeekday(y,5,1,-1),
+    isoOf(y,6,19), isoOf(y,7,4), nthWeekday(y,9,1,1), nthWeekday(y,10,1,2),
+    isoOf(y,11,11), nthWeekday(y,11,4,4), isoOf(y,12,25)
+  ];
+  const set = new Set();
+  for (const d of raw){
+    set.add(d);
+    const w = dow(d);
+    if (w === 6) set.add(addDays(d, -1));   // Saturday holiday observed Friday
+    if (w === 0) set.add(addDays(d,  1));   // Sunday holiday observed Monday
+  }
+  return set;
+}
+const _holCache = {};
+function holidaysFor(y){ return _holCache[y] || (_holCache[y] = usHolidays(y)); }
+function isBusinessDay(s, useHolidays){
+  const w = dow(s);
+  if (w === 0 || w === 6) return false;
+  return !(useHolidays && holidaysFor(ymd(s).y).has(s));
+}
+
+/**
+ * Business-day shift. "nearest" picks the genuinely closer weekday, so Saturday
+ * goes back to Friday and Sunday goes FORWARD to Monday. The legacy workbook
+ * sent both back to Friday (constants $C$3=1, $C$4=2), contradicting its own
+ * note on the Income sheet.
+ */
+function shiftBusiness(s, policy, useHolidays){
+  if (!policy || policy === "none") return {date:s, moved:0};
+  if (isBusinessDay(s, useHolidays)) return {date:s, moved:0};
+  let back = s, fwd = s, bn = 0, fn = 0;
+  while (!isBusinessDay(back, useHolidays) && bn < 12){ back = addDays(back, -1); bn++; }
+  while (!isBusinessDay(fwd,  useHolidays) && fn < 12){ fwd  = addDays(fwd,   1); fn++; }
+  let d;
+  if (policy === "before")      d = back;
+  else if (policy === "after")  d = fwd;
+  else                          d = (fn < bn) ? fwd : back;   // nearest; tie goes back
+  return {date:d, moved:diffDays(s, d)};
+}
+
+const MONTH_STEP = {MONTHLY:1, BIMONTHLY:2, QUARTERLY:3, SEMIANNUAL:6, ANNUAL:12};
+const DAY_STEP   = {DAILY:1, WEEKLY:7, BIWEEKLY:14};
+const MONTH_END_POLICY = {
+  clamp: "Clamp to last day",
+  skip:  "Skip that month",
+  roll:  "Roll to the 1st"
+};
+
+/** The k-th raw occurrence, or null to stop, or "SKIP" to omit this one. */
+function nthOccurrence(rec, k){
+  const f = rec.frequency, a = ymd(rec.anchorDate);
+  if (!a.y) return null;
+  if (f === "ONETIME") return k === 0 ? rec.anchorDate : null;
+  if (DAY_STEP[f])            return addDays(rec.anchorDate, DAY_STEP[f] * k);
+  if (f === "EVERY_N_DAYS")   return addDays(rec.anchorDate, Math.max(1, rec.intervalN || 1) * k);
+  if (f === "EVERY_N_WEEKS")  return addDays(rec.anchorDate, 7 * Math.max(1, rec.intervalN || 1) * k);
+
+  if (f === "SEMIMONTHLY"){
+    // Two real anchors a month, not the legacy "+15 days forever".
+    const mo = Math.floor(k / 2), second = (k % 2) === 1;
+    const total = (a.m - 1) + mo;
+    const y = a.y + Math.floor(total / 12), m = ((total % 12) + 12) % 12 + 1;
+    const dim = daysInMonth(y, m);
+    const d2 = rec.semiDay2 ? rec.semiDay2 : a.d + 15;
+    return isoOf(y, m, Math.min(second ? d2 : a.d, dim));
+  }
+
+  const step = MONTH_STEP[f] || (f === "EVERY_N_MONTHS" ? Math.max(1, rec.intervalN || 1) : 0);
+  if (!step) return null;
+  const total = (a.m - 1) + step * k;
+  const y = a.y + Math.floor(total / 12), m = ((total % 12) + 12) % 12 + 1;
+  const dim = daysInMonth(y, m);
+  if (a.d <= dim) return isoOf(y, m, a.d);          // the anchor day always returns
+  const p = rec.monthEndPolicy || "clamp";
+  if (p === "skip") return "SKIP";
+  if (p === "roll") return normISO(y, m + 1, 1);
+  return isoOf(y, m, dim);
+}
+
+function occurrences(rec, opts){
+  const o = opts || {};
+  const max = o.max || 12;
+  const out = [];
+  if (!rec.anchorDate) return out;
+  // Bound by DATE, not just by count: an anchor years in the past would otherwise
+  // outrun a count cap before reaching today and look like "no future dates".
+  const horizon = o.until || addDays(o.from || rec.anchorDate, 366 * 12);
+  for (let k = 0; k < 20000 && out.length < max; k++){
+    const raw = nthOccurrence(rec, k);
+    if (raw === null) break;
+    if (raw === "SKIP") continue;
+    if (rec.endDate && raw > rec.endDate) break;
+    if (raw > horizon) break;
+    if (o.from && raw < o.from) continue;
+    const sh = shiftBusiness(raw, rec.businessDayPolicy, o.holidays !== false);
+    out.push({k:k, raw:raw, date:sh.date, moved:sh.moved});
+  }
+  return out;
+}
+
+/**
+ * The legacy workbook's engine, reproduced bug-for-bug, for the side-by-side diff.
+ * Chained from the previous date; Excel DATE() overflow; both weekend days to Friday.
+ */
+function legacyOccurrences(rec, count){
+  const out = [];
+  let cur = rec.anchorDate;
+  if (!cur) return out;
+  const f = rec.frequency;
+  const yStep = f === "ANNUAL" ? 1 : 0;
+  const mStep = f === "MONTHLY" ? 1 : (f === "QUARTERLY" ? 3 : 0);
+  const dStep = f === "DAILY" ? 1 : (f === "WEEKLY" ? 7 : (f === "BIWEEKLY" ? 14 : 0));
+  const shifts = rec.businessDayPolicy && rec.businessDayPolicy !== "none";
+  for (let k = 0; k < count; k++){
+    const a = ymd(cur);
+    const w = dow(cur);
+    let shown = cur;
+    if (shifts){
+      if (w === 6)      shown = normISO(a.y, a.m, a.d - 1);   // Saturday -> Friday
+      else if (w === 0) shown = normISO(a.y, a.m, a.d - 2);   // Sunday   -> Friday (the bug)
+    }
+    out.push({k:k, raw:cur, date:shown, moved:diffDays(cur, shown)});
+    if (f === "ONETIME") break;
+    if (f === "SEMIMONTHLY"){
+      cur = (a.d === 15) ? normISO(a.y, a.m + 1, 0) : addDays(cur, 15);
+    } else if (!yStep && !mStep && !dStep){
+      // Semi-annual, bi-monthly and every-N had no legacy equivalent: the workbook's
+      // three step cells all resolved to 0, so the same date repeated forever.
+    } else {
+      cur = normISO(a.y + yStep, a.m + mStep, a.d + dStep);
+    }
+  }
+  return out;
+}
+
+/* ---- M2 fixtures. These run in the page, visibly, every time you open it. ---- */
+
+function runFixtures(){
+  const T = [];
+  const R = (o) => Object.assign({
+    frequency:"MONTHLY", businessDayPolicy:"none", endDate:null, monthEndPolicy:"clamp"
+  }, o);
+  const D = (rec, n, opts) => occurrences(rec, Object.assign({max:n}, opts || {})).map(o => o.date).join(",");
+  const L = (rec, n) => legacyOccurrences(rec, n).map(o => o.date).join(",");
+  const t = (group, name, got, want, note) => T.push({
+    group:group, name:name, got:String(got), want:String(want), ok:String(got) === String(want), note:note || ""
+  });
+
+  // --- month-end: the anchor day must always come back ---
+  t("Month end", "Bill on the 31st, next 4",
+    D(R({anchorDate:"2026-01-31"}), 4), "2026-01-31,2026-02-28,2026-03-31,2026-04-30",
+    "Feb clamps to the 28th, then March returns to the 31st");
+  t("Month end", "…and May is the 31st again",
+    D(R({anchorDate:"2026-01-31"}), 5).split(",")[4], "2026-05-31");
+  t("Month end", "LEGACY skips February and re-anchors to the 3rd",
+    L(R({anchorDate:"2026-01-31"}), 4), "2026-01-31,2026-03-03,2026-04-03,2026-05-03",
+    "Excel DATE(2026,2,31) overflows to Mar 3, and the chain never recovers");
+  t("Month end", "Policy: skip that month",
+    D(R({anchorDate:"2026-01-31", monthEndPolicy:"skip"}), 3), "2026-01-31,2026-03-31,2026-05-31");
+  t("Month end", "Policy: roll to the 1st",
+    D(R({anchorDate:"2026-01-31", monthEndPolicy:"roll"}), 3), "2026-01-31,2026-03-01,2026-03-31");
+  t("Month end", "30th anchor in February",
+    D(R({anchorDate:"2026-01-30"}), 3), "2026-01-30,2026-02-28,2026-03-30");
+
+  // --- leap years ---
+  t("Leap year", "Feb 29 yearly clamps, then returns in 2028",
+    D(R({anchorDate:"2024-02-29", frequency:"ANNUAL"}), 5),
+    "2024-02-29,2025-02-28,2026-02-28,2027-02-28,2028-02-29");
+  t("Leap year", "2026 February has 28 days", daysInMonth(2026, 2), 28);
+  t("Leap year", "2028 February has 29 days", daysInMonth(2028, 2), 29);
+
+  // --- weekends: Sunday goes FORWARD ---
+  t("Weekends", "Saturday moves back to Friday",
+    D(R({anchorDate:"2026-09-26", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-09-25");
+  t("Weekends", "Sunday moves FORWARD to Monday",
+    D(R({anchorDate:"2026-09-27", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-09-28",
+    "The legacy file sent Sunday back to Friday — a 3-day error on every affected payday");
+  t("Weekends", "LEGACY sends Sunday back to Friday",
+    L(R({anchorDate:"2026-09-27", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-09-25");
+  t("Weekends", "LEGACY sends Saturday back to Friday (this one agrees)",
+    L(R({anchorDate:"2026-09-26", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-09-25");
+  t("Weekends", "Policy 'weekday before': Sunday to Friday",
+    D(R({anchorDate:"2026-09-27", frequency:"ONETIME", businessDayPolicy:"before"}), 1), "2026-09-25");
+  t("Weekends", "Policy 'weekday after': Saturday to Monday",
+    D(R({anchorDate:"2026-09-26", frequency:"ONETIME", businessDayPolicy:"after"}), 1), "2026-09-28");
+  t("Weekends", "A weekday is never moved",
+    D(R({anchorDate:"2026-09-23", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-09-23");
+  t("Weekends", "Shifts never accumulate — the anchor chain is untouched",
+    D(R({anchorDate:"2026-08-01", frequency:"MONTHLY", businessDayPolicy:"nearest"}), 3),
+    "2026-07-31,2026-09-01,2026-10-01",
+    "Aug 1 2026 is a Saturday; the September and October dates are unaffected by that shift");
+
+  // --- semi-monthly: two real anchors ---
+  t("Semi-monthly", "1st and 16th",
+    D(R({anchorDate:"2026-10-01", frequency:"SEMIMONTHLY"}), 6),
+    "2026-10-01,2026-10-16,2026-11-01,2026-11-16,2026-12-01,2026-12-16");
+  t("Semi-monthly", "15th and 30th",
+    D(R({anchorDate:"2026-10-15", frequency:"SEMIMONTHLY"}), 4),
+    "2026-10-15,2026-10-30,2026-11-15,2026-11-30");
+  t("Semi-monthly", "…the 30th clamps in February",
+    D(R({anchorDate:"2026-01-15", frequency:"SEMIMONTHLY"}), 6),
+    "2026-01-15,2026-01-30,2026-02-15,2026-02-28,2026-03-15,2026-03-30");
+  t("Semi-monthly", "LEGACY is just +15 days and drifts",
+    L(R({anchorDate:"2026-02-01", frequency:"SEMIMONTHLY"}), 6),
+    "2026-02-01,2026-02-16,2026-03-03,2026-03-18,2026-04-02,2026-04-17",
+    "This is the exact series the old workbook produced — it never lands on the 1st again");
+
+  // --- the rest of the frequencies ---
+  t("Frequencies", "Weekly", D(R({anchorDate:"2026-10-01", frequency:"WEEKLY"}), 4),
+    "2026-10-01,2026-10-08,2026-10-15,2026-10-22");
+  t("Frequencies", "Bi-weekly is exactly 14 days",
+    D(R({anchorDate:"2026-10-01", frequency:"BIWEEKLY"}), 4),
+    "2026-10-01,2026-10-15,2026-10-29,2026-11-12");
+  t("Frequencies", "Quarterly", D(R({anchorDate:"2026-01-01", frequency:"QUARTERLY"}), 4),
+    "2026-01-01,2026-04-01,2026-07-01,2026-10-01");
+  t("Frequencies", "Every 2 months", D(R({anchorDate:"2026-01-01", frequency:"BIMONTHLY"}), 4),
+    "2026-01-01,2026-03-01,2026-05-01,2026-07-01");
+  t("Frequencies", "Semi-annual", D(R({anchorDate:"2026-10-26", frequency:"SEMIANNUAL"}), 3),
+    "2026-10-26,2027-04-26,2027-10-26");
+  t("Frequencies", "Yearly", D(R({anchorDate:"2026-06-19", frequency:"ANNUAL"}), 3),
+    "2026-06-19,2027-06-19,2028-06-19");
+  t("Frequencies", "One time happens once",
+    D(R({anchorDate:"2026-10-01", frequency:"ONETIME"}), 5), "2026-10-01");
+  t("Frequencies", "Every N months (N=4)",
+    D(R({anchorDate:"2026-01-01", frequency:"EVERY_N_MONTHS", intervalN:4}), 3),
+    "2026-01-01,2026-05-01,2026-09-01");
+  t("Frequencies", "Every N weeks (N=3)",
+    D(R({anchorDate:"2026-01-01", frequency:"EVERY_N_WEEKS", intervalN:3}), 3),
+    "2026-01-01,2026-01-22,2026-02-12");
+  t("Frequencies", "LEGACY had no semi-annual — the date froze",
+    L(R({anchorDate:"2026-10-26", frequency:"SEMIANNUAL"}), 3),
+    "2026-10-26,2026-10-26,2026-10-26",
+    "All three of the workbook's step cells resolved to 0, so the row repeated forever");
+
+  // --- end dates ---
+  t("End date", "Blank end date runs indefinitely",
+    D(R({anchorDate:"2026-01-01"}), 3).split(",").length, 3);
+  t("End date", "An end date stops the series",
+    D(R({anchorDate:"2026-01-01", endDate:"2026-03-15"}), 12),
+    "2026-01-01,2026-02-01,2026-03-01");
+  t("End date", "An end date on an occurrence includes it",
+    D(R({anchorDate:"2026-01-01", endDate:"2026-03-01"}), 12),
+    "2026-01-01,2026-02-01,2026-03-01");
+
+  // --- holidays ---
+  t("Holidays", "July 4 2026 falls on a Saturday", dow("2026-07-04"), 6);
+  t("Holidays", "Fri Jul 3 2026 is the observed holiday, so it moves",
+    D(R({anchorDate:"2026-07-03", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-07-02");
+  t("Holidays", "…and stays put with holidays switched off",
+    D(R({anchorDate:"2026-07-03", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1, {holidays:false}),
+    "2026-07-03");
+  t("Holidays", "Christmas 2026 (a Friday) moves back to Dec 24",
+    D(R({anchorDate:"2026-12-25", frequency:"ONETIME", businessDayPolicy:"nearest"}), 1), "2026-12-24");
+  t("Holidays", "Thanksgiving 2026 is Nov 26", nthWeekday(2026, 11, 4, 4), "2026-11-26");
+  t("Holidays", "Memorial Day 2026 is May 25", nthWeekday(2026, 5, 1, -1), "2026-05-25");
+
+  // --- monthly equivalents (reporting only) ---
+  t("Monthly equivalent", "$100/week is $433.33/mo, not $428.57",
+    perMonth(10000, "WEEKLY"), 43333,
+    "The legacy 'em fund' sheet used (x/7)*30 and read 5% low");
+  t("Monthly equivalent", "$100 bi-weekly", perMonth(10000, "BIWEEKLY"), 21667);
+
+  // --- money parsing, including the running sums people type into Actual ---
+  t("Money", "plain", toCents("12.50"), 1250);
+  t("Money", "grouped", toCents("1,234.56"), 123456);
+  t("Money", "three decimals round half-up", toCents("0.145"), 15,
+    "parseFloat would give 14.4999... and truncate to 14");
+  t("Money", "negative", toCents("-50"), -5000);
+  t("Money", "parentheses are negative", toCents("(50)"), -5000);
+  t("Money", "trailing minus is negative", toCents("50-"), -5000);
+  t("Money", "a sum of receipts", toCents("12.50+8.75+30"), 5125);
+  t("Money", "sum with spaces", toCents("12.50 + 8.75"), 2125);
+  t("Money", "sum with a subtraction", toCents("100-25.50"), 7450);
+  t("Money", "a returned item", toCents("80+20-15"), 8500);
+  t("Money", "grouped terms in a sum", toCents("1,200.00+300"), 150000);
+  t("Money", "a sum is not confused by a leading minus", toCents("-10+4"), -600);
+  t("Money", "trailing operator is ignored", toCents("40+"), 4000);
+  t("Money", "$ signs and spaces survive a sum", toCents("$12.50 + $8.75"), 2125);
+
+  // --- spreadsheet formulas ---
+  t("Formula", "leading = still sums", toCents("=123+123"), 24600);
+  t("Formula", "= with spaces", toCents("= 123 + 123"), 24600);
+  t("Formula", "= on a single value", toCents("=123"), 12300);
+  t("Formula", "= is a formula even alone", isFormula("=123"), true,
+    "so it is remembered and reopens as a formula, like a spreadsheet");
+  t("Formula", "a bare number is not", isFormula("123"), false);
+  t("Formula", "multiply", toCents("=4*12.50"), 5000);
+  t("Formula", "divide", toCents("=100/4"), 2500);
+  t("Formula", "times binds tighter than plus", toCents("=4*12.50+10"), 6000);
+  t("Formula", "…on the right too", toCents("=10+4*12.50"), 6000);
+  t("Formula", "minus a product", toCents("=100-2*15"), 7000);
+  t("Formula", "chained", toCents("=2*3*4"), 2400);
+  t("Formula", "grouped numbers inside a formula", toCents("=1,200.50+300"), 150050);
+  t("Formula", "divide by zero is refused", evalFormula("=10/0"), null);
+  t("Formula", "a lone = is not a formula", toCents("="), 0);
+  t("Formula", "=abc parses to nothing", toCents("=abc"), 0);
+  t("Formula", "rounding happens once at the end", toCents("=10/3"), 333);
+  t("Formula", "negatives still work", toCents("-50"), -5000);
+  t("Formula", "parentheses are still negative", toCents("(50)"), -5000);
+  t("Monthly equivalent", "$100 semi-monthly is exactly $200", perMonth(10000, "SEMIMONTHLY"), 20000);
+  t("Monthly equivalent", "$600 quarterly is $200", perMonth(60000, "QUARTERLY"), 20000);
+  t("Monthly equivalent", "$649 semi-annual", perMonth(64900, "SEMIANNUAL"), 10817);
+  t("Monthly equivalent", "One-time contributes nothing recurring", perMonth(50000, "ONETIME"), 0);
+
+  return T;
+}
+
+const ACCOUNT_KINDS = {
+  cash:       {label:"Cash / Checking", sign:+1, debt:false},
+  savings:    {label:"Savings",         sign:+1, debt:false},
+  credit:     {label:"Credit Card",     sign:-1, debt:true},
+  loan:       {label:"Loan",            sign:-1, debt:true},
+  investment: {label:"Investment",      sign:+1, debt:false}
+};
+const COMPOUNDING = ["daily","monthly","quarterly","semiannual","annual"];
+const BIZ_POLICY = {
+  none:    "Exact date",
+  nearest: "Nearest weekday",
+  before:  "Weekday before",
+  after:   "Weekday after"
+};
+
+function uid(prefix){
+  return prefix + "-" + Math.random().toString(36).slice(2, 9);
+}
+
+/* ============================================================
+   2. STATE
+   ============================================================ */
+
+const SCHEMA_VERSION = 1;
+
+const state = {
+  settings: null,
+  accounts: [],
+  categories: [],
+  recurrences: [],
+  goals: [],
+  txMonths: {},        // "YYYY-MM" -> [tx]
+  budgetMonths: {},    // "YYYY-MM" -> {budgeted:{catId:cents}}
+  activeMonth: monthKey(todayISO()),
+  budgetMonth: monthKey(todayISO()),
+  importDraft: {},
+  exprs: {},           // input id -> the sum someone typed, kept so it can be edited
+  tab: "dashboard",
+  sampleData: false
+};
+
+function blankSettings(){
+  return {
+    version: SCHEMA_VERSION,
+    asOfDate: todayISO(),
+    operatingFloor_c: 10000,          // $100 hard zero-guard
+    bufferHeld_c: 0,                  // buffer already saved INSIDE the operating account
+    bufferDefinition: "expensesPlusMinimums",
+    overspendPolicy: "carry",         // your literal rule
+    creditModel: "simple",
+    bufferTiers: [1, 6, 12, 24],
+    budgetLookaheadMonths: 6,         // months kept budgeted ahead of today
+    openingTBB_c: null,               // null = seed from cash balances
+    budgetStartMonth: null,           // envelopes carry from here; earlier months are history
+    baseline: null,                   // the plan you locked in at setup, to measure drift against
+    createdAt: todayISO()
+  };
+}
+
+/**
+ * What a brand-new, empty database gets seeded with.
+ * "sample" fills in a worked household so the app opens in a working state;
+ * "blank" lays out the scaffolding and leaves every number for you to type.
+ */
+const SEED_MODE = "payload";
+const SEED_PAYLOAD = {"app":"better-budget","version":1,"exportedAt":"2026-10-08T21:56:02.423Z","settings":{"version":1,"asOfDate":"2026-10-01","baseline":{"savedAt":"2026-10-08","asOfDate":"2026-10-01","goals":{"g-buffer-1mo":{"name":"Savings buffer \u2014 1 month","date":"2027-03-17","target_c":1000976},"g-chunk":{"name":"Pay off mortgage","date":"2032-02-02","target_c":24800000},"g-25k":{"name":"25k Large Emergency","date":"2031-12-31","target_c":2000000},"g-inv":{"name":"Investing / Travel","date":"2052-06-03","target_c":1000000000},"g-sweep":{"name":"investments","date":null,"target_c":1000000000000000}},"low_c":415461,"lowDate":"2026-10-08","netEnd_c":1803958632,"debtFree":"2032-02-02"},"createdAt":"2026-09-23","bufferTiers":[1,6,12,24],"creditModel":"simple","bufferHeld_c":159790,"horizonYears":30,"importedFrom":"Max Your Budget v4.0.xlsx (September 2026)","openingTBB_c":null,"overspendPolicy":"reset","budgetStartMonth":"2026-10","bufferDefinition":"expensesPlusMinimums","operatingFloor_c":50000},"accounts":[{"id":"a-chk","kind":"cash","name":"Checking","dueDay":0,"apr_bps":350,"isSweep":false,"escrow_c":0,"compounding":"daily","paymentMode":"minimum","contribution":null,"minPayment_c":0,"originationDate":"","openingBalance_c":400000,"originalPrincipal_c":0,"participatesInBudget":true},{"id":"a-loan","kind":"loan","name":"mortgage","dueDay":28,"apr_bps":650,"isSweep":false,"escrow_c":30000,"compounding":"daily","paymentMode":"minimum","contribution":null,"minPayment_c":200000,"originationDate":"","openingBalance_c":-24800000,"originalPrincipal_c":-2000000,"participatesInBudget":false},{"id":"a-401k","kind":"investment","name":"investments","dueDay":0,"apr_bps":1200,"isSweep":true,"escrow_c":0,"compounding":"daily","paymentMode":"minimum","contribution":null,"minPayment_c":0,"originationDate":"","openingBalance_c":0,"originalPrincipal_c":0,"participatesInBudget":false}],"categories":[{"id":"c-wages","name":"Net Wages","group":"Income","isEarmarked":false},{"id":"c-util","name":"Electricity","group":"Housing","isEarmarked":false},{"id":"c-net","name":"Internet / Cable","group":"Housing","isEarmarked":false},{"id":"c-maint","name":"Maintenance","group":"Auto","isEarmarked":true},{"id":"c-groc","name":"Groceries","group":"Daily","isEarmarked":false},{"id":"c-vac","name":"Vacation","group":"Discretion","isEarmarked":true},{"id":"c-disc","name":"Discretionary","group":"Discretion","isEarmarked":false},{"id":"c-tithe","name":"Tithe","group":"Giving","isEarmarked":false},{"id":"c-giving","name":"Giving","group":"Giving","isEarmarked":false},{"id":"c-gifts","name":"Gifts","group":"Giving","isEarmarked":true},{"id":"c-household-materials","name":"Household Materials","group":"Home","isEarmarked":false},{"id":"c-water-sewage","name":"Water/Sewage","group":"Home","isEarmarked":false},{"id":"c-subscriptions","name":"Subscriptions","group":"Home","isEarmarked":false},{"id":"c-clothes","name":"Clothes","group":"Living","isEarmarked":false},{"id":"c-fuel","name":"Fuel","group":"Auto","isEarmarked":false},{"id":"c-ach-life-insurance","name":"ACH - Life Insurance","group":"Insurance","isEarmarked":false},{"id":"c-health","name":"Health","group":"Insurance","isEarmarked":false},{"id":"c-silas","name":"Silas","group":"Kids","isEarmarked":false},{"id":"c-abigail","name":"Abigail","group":"Kids","isEarmarked":false},{"id":"c-eli","name":"Eli","group":"Kids","isEarmarked":false},{"id":"c-eden","name":"Eden","group":"Kids","isEarmarked":false},{"id":"c-amos","name":"Amos","group":"Kids","isEarmarked":false},{"id":"c-kelsey","name":"Kelsey","group":"Personal","isEarmarked":false},{"id":"c-micah","name":"Micah","group":"Personal","isEarmarked":false},{"id":"c-dates","name":"Dates","group":"Discretionary","isEarmarked":false},{"id":"c-emergency-savings","name":"Emergency Savings","group":"Savings","isEarmarked":false},{"id":"c-savings","name":"Savings","group":"Savings","isEarmarked":false}],"recurrences":[{"id":"r-i1","kind":"income","name":"Micah","note":"Static monthly salary.","endDate":"2027-12-29","amount_c":433000,"accountId":"a-chk","frequency":"SEMIMONTHLY","intervalN":1,"anchorDate":"2026-10-07","categoryId":"c-wages","monthEndPolicy":"clamp","businessDayPolicy":"nearest"},{"id":"r-i2","kind":"income","name":"Kelsey","note":"Static monthly.","endDate":"2027-12-31","amount_c":77700,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-09","categoryId":"c-wages","monthEndPolicy":"clamp","businessDayPolicy":"nearest"},{"id":"r-fo6qkye","kind":"expense","name":"Tithe","note":"","endDate":null,"amount_c":94270,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-07","categoryId":"c-tithe","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-viba1zn","kind":"expense","name":"Electricity","note":"","endDate":null,"amount_c":32500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-07","categoryId":"c-util","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-yyeap45","kind":"expense","name":"Water","note":"","endDate":null,"amount_c":17500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-water-sewage","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-3iwfn8e","kind":"expense","name":"Internet","note":"","endDate":null,"amount_c":9950,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-net","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-fvxd8e7","kind":"expense","name":"subscriptions","note":"","endDate":null,"amount_c":4303,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-subscriptions","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-l8cg5y7","kind":"expense","name":"clothes","note":"","endDate":null,"amount_c":5000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-clothes","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-axjo38z","kind":"expense","name":"Groceries","note":"","endDate":"2028-12-31","amount_c":240000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-groc","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-3yf5a2b","kind":"expense","name":"Fuel","note":"","endDate":null,"amount_c":35000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-fuel","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-e6zjsv3","kind":"expense","name":"Car Maintenance","note":"","endDate":null,"amount_c":7500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-maint","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-s2vl5cr","kind":"expense","name":"Life Insurance","note":"","endDate":null,"amount_c":19953,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-ach-life-insurance","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-8xmconi","kind":"expense","name":"Health","note":"","endDate":"2027-09-29","amount_c":37500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-health","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-v1u179l","kind":"expense","name":"Silas","note":"","endDate":null,"amount_c":500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-09","categoryId":"c-silas","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-avsv9nr","kind":"expense","name":"Abigail","note":"","endDate":null,"amount_c":500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-abigail","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-non0lck","kind":"expense","name":"Eli","note":"","endDate":null,"amount_c":500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-eli","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-hrbv4c0","kind":"expense","name":"Eden","note":"","endDate":null,"amount_c":500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-eden","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-iaj9xkg","kind":"expense","name":"Amos","note":"","endDate":null,"amount_c":500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-amos","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-zcpwj4k","kind":"expense","name":"Kelsey","note":"","endDate":null,"amount_c":2500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-kelsey","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-t645xu8","kind":"expense","name":"Micah","note":"","endDate":null,"amount_c":2500,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-micah","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-e59wnnf","kind":"expense","name":"Vacation","note":"","endDate":null,"amount_c":10000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-vac","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-1tcnmpz","kind":"expense","name":"Dates","note":"","endDate":null,"amount_c":10000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-dates","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-giwq1th","kind":"expense","name":"Savings","note":"","endDate":"2050-09-29","amount_c":100000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-emergency-savings","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-0epehj7","kind":"expense","name":"household supplies","note":"","endDate":"2028-12-31","amount_c":50000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2026-10-08","categoryId":"c-household-materials","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-9nw8pzv","kind":"expense","name":"Household supplies","note":"","endDate":null,"amount_c":20000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2029-01-01","categoryId":"c-household-materials","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-fz6fjze","kind":"expense","name":"Groceries","note":"","endDate":null,"amount_c":100000,"semiDay2":null,"accountId":"a-chk","frequency":"MONTHLY","intervalN":1,"anchorDate":"2029-01-01","categoryId":"c-groc","monthEndPolicy":"clamp","businessDayPolicy":"none"},{"id":"r-ebanyo9","kind":"income","name":"Micah","note":"","endDate":null,"amount_c":500000,"semiDay2":null,"accountId":"a-chk","frequency":"SEMIMONTHLY","intervalN":1,"anchorDate":"2028-01-01","categoryId":"c-wages","annualRaisePct":4,"monthEndPolicy":"clamp","businessDayPolicy":"nearest"},{"id":"r-5foibrt","kind":"income","name":"taxes","note":"","endDate":null,"amount_c":400000,"semiDay2":null,"accountId":"a-chk","frequency":"ANNUAL","intervalN":1,"anchorDate":"2027-03-17","categoryId":"c-wages","monthEndPolicy":"clamp","businessDayPolicy":"nearest"}],"goals":[{"id":"g-chunk","kind":"payoff","name":"Pay off mortgage","locked":{"amount":false,"priority":false},"priority":2,"targetDate":null,"derivedFrom":null,"targetAmount_c":24800000,"linkedAccountId":"a-loan"},{"id":"g-25k","kind":"savings","name":"25k Large Emergency","locked":{"amount":false,"priority":false},"priority":2,"targetDate":null,"derivedFrom":null,"targetAmount_c":2000000,"linkedAccountId":"a-chk"},{"id":"g-inv","kind":"invest","name":"Investing / Travel","locked":{"amount":false,"priority":false},"priority":3,"targetDate":"2026-09-29","derivedFrom":null,"targetAmount_c":1000000000,"linkedAccountId":"a-401k"}],"transactions":{"2026-09":[],"2026-10":[{"id":"t-adj-c-util-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-36030,"accountId":"a-chk","categoryId":"c-util"},{"id":"t-adj-c-net-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-9950,"accountId":"a-chk","categoryId":"c-net"},{"id":"t-adj-c-subscriptions-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-4303,"accountId":"a-chk","categoryId":"c-subscriptions"},{"id":"t-adj-c-health-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-34000,"accountId":"a-chk","categoryId":"c-health"},{"id":"t-adj-c-household-materials-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-15484,"accountId":"a-chk","categoryId":"c-household-materials"},{"id":"t-adj-c-groc-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-103211,"accountId":"a-chk","categoryId":"c-groc"},{"id":"t-adj-c-fuel-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-7900,"accountId":"a-chk","categoryId":"c-fuel"},{"id":"t-inc-r-i1-2026-10-07","date":"2026-10-07","memo":"Income recorded on the budget","payee":"Micah","cleared":true,"amount_c":439224,"accountId":"a-chk","satisfies":{"recId":"r-i1","occDate":"2026-10-07"},"categoryId":"c-wages"},{"id":"t-adj-c-tithe-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-20600,"accountId":"a-chk","categoryId":"c-tithe"},{"id":"t-adj-c-ach-life-insurance-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-19953,"accountId":"a-chk","categoryId":"c-ach-life-insurance"},{"id":"t-adj-c-water-sewage-2026-10","date":"2026-10-15","memo":"Typed into the Actual column","payee":"Quick entry","quick":true,"cleared":false,"amount_c":-8711,"accountId":"a-chk","categoryId":"c-water-sewage"},{"id":"t-adj-c-maint-2026-10","date":"2026-10-15","payee":"Quick entry","categoryId":"c-maint","accountId":"a-chk","amount_c":-67300,"memo":"Typed into the Actual column","cleared":false,"quick":true}]},"budgetMonths":{"2027-04":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-household-materials":50000}},"2026-11":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-car-maintenance-ins":6000,"c-household-materials":50000}},"2026-10":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":36030,"c-dates":10000,"c-maint":75000,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":100000,"c-ach-life-insurance":19953,"c-household-materials":50000}},"2026-12":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-household-materials":50000}},"2027-01":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-household-materials":50000}},"2027-02":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-household-materials":50000}},"2027-03":{"budgeted":{"c-eli":500,"c-net":9950,"c-vac":10000,"c-amos":500,"c-eden":500,"c-fuel":35000,"c-groc":240000,"c-util":32500,"c-dates":10000,"c-maint":7500,"c-micah":2500,"c-silas":500,"c-tithe":94270,"c-health":37500,"c-kelsey":2500,"c-abigail":500,"c-clothes":5000,"c-water-sewage":17500,"c-subscriptions":4303,"c-emergency-savings":50000,"c-ach-life-insurance":19953,"c-household-materials":50000}}}};
+
+/* ---- blank template: structure only, no figures ---- */
+function blankState(){
+  const cats = [
+    ["Income",        "Salary",            false],
+    ["Home",          "Rent / Mortgage",   false],
+    ["Home",          "Electricity",       false],
+    ["Home",          "Water / Gas",       false],
+    ["Home",          "Internet / Phone",  false],
+    ["Home",          "Household",         false],
+    ["Daily",         "Groceries",         false],
+    ["Daily",         "Eating out",        false],
+    ["Auto",          "Fuel",              false],
+    ["Auto",          "Insurance",         true],
+    ["Auto",          "Maintenance",       true],
+    ["Health",        "Insurance",         false],
+    ["Health",        "Medical",           false],
+    ["Discretionary", "Clothes",           false],
+    ["Discretionary", "Entertainment",     false],
+    ["Discretionary", "Gifts",             true],
+    ["Discretionary", "Vacation",          true],
+    ["Savings",       "Savings",           false]
+  ];
+  const slug = (g, n) => "c-" + (g + "-" + n).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const s = blankSettings();
+  s.operatingFloor_c = 0;
+  s.bufferHeld_c = 0;
+  return {
+    settings: s,
+    accounts: [{
+      id: "a-chk", name: "Checking", kind: "cash", openingBalance_c: 0, apr_bps: 0,
+      compounding: "monthly", minPayment_c: 0, escrow_c: 0, paymentMode: "minimum",
+      dueDay: 0, originalPrincipal_c: 0, originationDate: "", contribution: null,
+      participatesInBudget: true
+    }],
+    categories: cats.map(c => ({id: slug(c[0], c[1]), group: c[0], name: c[1], isEarmarked: c[2]})),
+    recurrences: [],
+    goals: []
+  };
+}
+
+/* ---- sample household, shaped like the legacy workbook ---- */
+function sampleState(){
+  const acc = [
+    {id:"a-chk",  name:"Checking",      kind:"cash",       openingBalance_c:  256841, apr_bps:0,    compounding:"monthly", minPayment_c:0,     dueDay:0,  originalPrincipal_c:0,       originationDate:"", contribution:null, participatesInBudget:true},
+    {id:"a-cc2",  name:"Credit Card 2", kind:"credit",     openingBalance_c: -600000, apr_bps:1700, compounding:"daily",   minPayment_c: 20000, dueDay:15, originalPrincipal_c:0,       originationDate:"", contribution:null, participatesInBudget:false},
+    {id:"a-cc1",  name:"Credit Card 1", kind:"credit",     openingBalance_c: -700000, apr_bps:1500, compounding:"daily",   minPayment_c: 15000, dueDay:15, originalPrincipal_c:0,       originationDate:"", contribution:null, participatesInBudget:false},
+    {id:"a-loan", name:"Personal Loan", kind:"loan",       openingBalance_c:-1655000, apr_bps: 500, compounding:"daily",   minPayment_c: 16000, dueDay:28, originalPrincipal_c:-2000000, originationDate:"", contribution:null, participatesInBudget:false},
+    {id:"a-car",  name:"Car Loan",      kind:"loan",       openingBalance_c:-1560000, apr_bps: 450, compounding:"daily",   minPayment_c: 32500, dueDay: 1, originalPrincipal_c:-2200000, originationDate:"", contribution:null, participatesInBudget:false},
+    {id:"a-401k", name:"401(k)",        kind:"investment", openingBalance_c: 4200000, apr_bps: 700, compounding:"daily",   minPayment_c:0,     dueDay:0,  originalPrincipal_c:0,       originationDate:"",
+      contribution:{amount_c:40000, frequency:"MONTHLY", mandatory:true}, participatesInBudget:false}
+  ];
+  const cats = [
+    {id:"c-wages",  group:"Income",     name:"Net Wages",       isEarmarked:false},
+    {id:"c-util",   group:"Housing",    name:"Electricity",     isEarmarked:false},
+    {id:"c-net",    group:"Housing",    name:"Internet / Cable",isEarmarked:false},
+    {id:"c-ins",    group:"Auto",       name:"Auto Insurance",  isEarmarked:true},
+    {id:"c-gas",    group:"Auto",       name:"Gas",             isEarmarked:false},
+    {id:"c-maint",  group:"Auto",       name:"Maintenance",     isEarmarked:true},
+    {id:"c-groc",   group:"Daily",      name:"Groceries",       isEarmarked:false},
+    {id:"c-ent",    group:"Daily",      name:"Entertainment",   isEarmarked:false},
+    {id:"c-vac",    group:"Discretion", name:"Vacation",        isEarmarked:true},
+    {id:"c-disc",   group:"Discretion", name:"Discretionary",   isEarmarked:false}
+  ];
+  const recs = [
+    {id:"r-i1", kind:"income", name:"Husband",  categoryId:"c-wages", accountId:"a-chk", amount_c:150000, frequency:"SEMIMONTHLY", anchorDate:"2026-10-01", endDate:null, businessDayPolicy:"nearest", note:""},
+    {id:"r-i2", kind:"income", name:"Wife",     categoryId:"c-wages", accountId:"a-chk", amount_c:120000, frequency:"BIWEEKLY",    anchorDate:"2026-10-02", endDate:null, businessDayPolicy:"nearest", note:""},
+
+    {id:"r-e1", kind:"expense", name:"Electric Util",     categoryId:"c-util",  accountId:"a-chk", amount_c:15000, frequency:"MONTHLY",   anchorDate:"2026-10-15", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e2", kind:"expense", name:"Internet/Cable",    categoryId:"c-net",   accountId:"a-chk", amount_c: 7500, frequency:"MONTHLY",   anchorDate:"2026-10-10", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e3", kind:"expense", name:"Auto Insurance",    categoryId:"c-ins",   accountId:"a-chk", amount_c:64900, frequency:"SEMIANNUAL",anchorDate:"2026-10-26", endDate:null, businessDayPolicy:"none", note:"Legacy file had this as two separate Yearly rows"},
+    {id:"r-e4", kind:"expense", name:"Gas",               categoryId:"c-gas",   accountId:"a-chk", amount_c:10000, frequency:"WEEKLY",    anchorDate:"2026-10-04", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e5", kind:"expense", name:"Groceries",         categoryId:"c-groc",  accountId:"a-chk", amount_c:10000, frequency:"WEEKLY",    anchorDate:"2026-10-04", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e6", kind:"expense", name:"Going Out",         categoryId:"c-ent",   accountId:"a-chk", amount_c: 5000, frequency:"WEEKLY",    anchorDate:"2026-10-04", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e7", kind:"expense", name:"Car Maintenance",   categoryId:"c-maint", accountId:"a-chk", amount_c:20000, frequency:"QUARTERLY", anchorDate:"2026-10-01", endDate:null, businessDayPolicy:"none", note:""},
+    {id:"r-e8", kind:"expense", name:"Vacation",          categoryId:"c-vac",   accountId:"a-chk", amount_c:30000, frequency:"MONTHLY",   anchorDate:"2026-10-31", endDate:null, businessDayPolicy:"none", note:"Legacy: dated the 31st, so it skipped Feb and drifted to the 3rd"},
+    {id:"r-e9", kind:"expense", name:"Discretionary",     categoryId:"c-disc",  accountId:"a-chk", amount_c:50000, frequency:"MONTHLY",   anchorDate:"2026-10-31", endDate:null, businessDayPolicy:"none", note:""}
+  ];
+  const goals = [
+    {id:"g-chunk", name:"Chunk Mortgage",       targetAmount_c:2500000, targetDate:null,         priority:3, kind:"savings",    linkedAccountId:"", locked:{priority:false, amount:false}, derivedFrom:null},
+    {id:"g-25k",   name:"25k Large Emergency",  targetAmount_c:2000000, targetDate:null,         priority:4, kind:"savings",    linkedAccountId:"", locked:{priority:false, amount:false}, derivedFrom:null},
+    {id:"g-inv",   name:"Investing / Travel",   targetAmount_c:2500000, targetDate:"2029-06-30", priority:5, kind:"savings",    linkedAccountId:"", locked:{priority:false, amount:false}, derivedFrom:null}
+  ];
+  return {settings: blankSettings(), accounts: acc, categories: cats, recurrences: recs, goals: goals};
+}
+
+/* ============================================================
+   3. DERIVED — the solver's inputs, computed honestly
+   ============================================================ */
+
+function derive(){
+  const s = state.settings || blankSettings();
+
+  let incomeM = 0, expenseM = 0;
+  for (const r of state.recurrences){
+    const m = perMonth(Math.abs(r.amount_c), r.frequency, r.intervalN);
+    if (r.kind === "income") incomeM += m; else expenseM += m;
+  }
+
+  let debtMinM = 0, contribMandatoryM = 0, contribOptionalM = 0;
+  let debtTotal = 0, assetTotal = 0;
+  const underwater = [];
+  for (const a of state.accounts){
+    const k = ACCOUNT_KINDS[a.kind];
+    if (!k) continue;
+    if (k.debt){
+      // A minimum only counts when there is actually a balance to service, and never
+      // for a card cleared in full — its real cost is already the expense rows charged
+      // to it, so counting the minimum too would double it.
+      if (a.paymentMode !== "full" && a.openingBalance_c < 0) debtMinM += a.minPayment_c || 0;
+      debtTotal += Math.min(0, a.openingBalance_c);
+      // A payment whose non-escrow part is below the monthly interest grows forever.
+      // Cards cleared in full are exempt — they never carry a balance to grow.
+      const monthlyInterest = Math.round(Math.abs(a.openingBalance_c) * (a.apr_bps || 0) / 10000 / 12);
+      const toPrincipal = (a.minPayment_c || 0) - (a.escrow_c || 0);
+      if (a.paymentMode !== "full" && toPrincipal > 0 && monthlyInterest >= toPrincipal){
+        underwater.push({name:a.name, min:toPrincipal, interest:monthlyInterest, escrow:a.escrow_c || 0});
+      }
+    } else {
+      assetTotal += Math.max(0, a.openingBalance_c);
+    }
+    if (a.contribution && a.contribution.amount_c){
+      const m = perMonth(a.contribution.amount_c, a.contribution.frequency);
+      if (a.contribution.mandatory) contribMandatoryM += m; else contribOptionalM += m;
+    }
+  }
+
+  const minimumsM = debtMinM + contribMandatoryM;
+  const freeCashM = incomeM - expenseM - minimumsM;
+
+  // Buffer basis — your locked choice: living expenses + minimum debt payments.
+  const bufferBasisM = expenseM + debtMinM;
+
+  return {
+    incomeM, expenseM, debtMinM, contribMandatoryM, contribOptionalM,
+    minimumsM, freeCashM, bufferBasisM, debtTotal, assetTotal,
+    netWorth: assetTotal + debtTotal, underwater,
+    tiers: (s.bufferTiers || [1,6,12,24]).map(n => ({months:n, amount_c: bufferBasisM * n}))
+  };
+}
+
+/** Buffer goals are derived, not typed. Priority 0 is locked; the tiers sit at the bottom. */
+function bufferGoals(d){
+  const s = state.settings || blankSettings();
+  const tiers = s.bufferTiers || [1,6,12,24];
+  return tiers.map((n, i) => ({
+    id: "g-buffer-" + n,
+    name: n === 1 ? "Savings buffer — 1 month" : "Reserve — " + (n === 12 ? "1 year" : n === 24 ? "2 years" : n + " months"),
+    targetAmount_c: d.bufferBasisM * n,
+    targetDate: null,
+    priority: i === 0 ? 0 : 900 + i - 1,
+    kind: "buffer",
+    linkedAccountId: "",
+    locked: {priority: true, amount: false},
+    derivedFrom: "bufferBasis×" + n
+  }));
+}
+
+/* ============================================================
+   3a. ENVELOPE BUDGET (M4)
+   remaining[p][c] = carryIn[p][c] + budgeted[p][c] + activity[p][c]
+   carryIn[p][c]   = rollover(remaining[p-1][c])
+   Verified against a real Max Your Budget sheet: every September row
+   satisfies carryIn + budgeted - actual = remaining, and Savings carries a
+   NEGATIVE budgeted, which is how money moves between envelopes.
+   Derived from three stored inputs only — budgeted cells, transactions and the
+   opening seed — so a stored aggregate can never drift out of agreement.
+   ============================================================ */
+
+function rollover(prev, policy){
+  if (policy === "carryPositiveOnly") return Math.max(0, prev);
+  if (policy === "reset") return 0;
+  return prev;                                   // 'carry' — the stated rule
+}
+
+/** Every month from the earliest data to `through`, inclusive. */
+function budgetMonthKeys(through){
+  const keys = new Set([monthKey(todayISO())]);
+  for (const k of Object.keys(state.txMonths)) keys.add(k);
+  for (const k of Object.keys(state.budgetMonths)) keys.add(k);
+  const sorted = Array.from(keys).sort();
+  const first = sorted[0] || monthKey(todayISO());
+  const out = [];
+  let k = first;
+  let guard = 0;
+  while (k <= through && guard++ < 600){ out.push(k); k = shiftMonth(k, 1); }
+  return out;
+}
+
+/** Categories any income recurrence posts to — a deposit coded to one is income, not spending. */
+function incomeCategoryIds(){
+  const s = new Set();
+  for (const r of state.recurrences) if (r.kind === "income" && r.categoryId) s.add(r.categoryId);
+  return s;
+}
+
+/** A category is income if an income row posts to it, or it sits in an Income group. */
+function isIncomeCategory(c, set){
+  if (!c) return false;
+  if ((c.group || "").trim().toLowerCase() === "income") return true;
+  return (set || incomeCategoryIds()).has(c.id);
+}
+
+/** Every income occurrence in a month, with what has actually been received against it. */
+function incomeRowsFor(mk){
+  const p = mk.split("-").map(Number);
+  const mStart = isoOf(p[0], p[1], 1);
+  const mEnd = isoOf(p[0], p[1], daysInMonth(p[0], p[1]));
+  const txs = state.txMonths[mk] || [];
+  const rows = [];
+  for (const r of state.recurrences){
+    if (r.kind !== "income" || !r.amount_c) continue;
+    for (const o of occurrences(r, {max:60, from:mStart, until:mEnd})){
+      const id = "t-inc-" + r.id + "-" + o.date;
+      const tx = txs.find(t => t.id === id);
+      rows.push({id:id, recId:r.id, occDate:o.date, name:r.name || "(unnamed)",
+                 accountId:r.accountId, categoryId:r.categoryId || "",
+                 planned_c: overriddenAmount(r, o.date),
+                 standing_c: amountOn(r, o.date),
+                 overridden: overriddenAmount(r, o.date) !== amountOn(r, o.date),
+                 received_c: tx ? tx.amount_c : 0, has: !!tx});
+    }
+  }
+  rows.sort((a, b) => a.occDate.localeCompare(b.occDate));
+  return rows;
+}
+
+/**
+ * One-off money that no recurring row predicts: a tax refund, a bonus, a rebate.
+ * It is stored as an ordinary uncategorised deposit, which is exactly what the
+ * budget already treats as income — so it lands in To Be Budgeted with no special
+ * case anywhere in the envelope maths.
+ */
+const EXTRA_PREFIX = "t-extra-";
+
+function extraIncomeFor(mk){
+  return (state.txMonths[mk] || []).filter(t => String(t.id).indexOf(EXTRA_PREFIX) === 0)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+function addExtraIncome(mk){
+  const list = state.txMonths[mk] || (state.txMonths[mk] = []);
+  const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+  list.push({id: EXTRA_PREFIX + uid("x"), date: mk + "-01", payee: "", categoryId: "",
+             accountId: op.id || "", amount_c: 0, memo: "One-off income", cleared: true});
+  persistMonth(mk);
+}
+
+function updateExtraIncome(mk, id, patch){
+  const list = state.txMonths[mk] || [];
+  const t = list.find(x => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch);
+  persistMonth(mk);
+}
+
+function removeExtraIncome(mk, id){
+  state.txMonths[mk] = (state.txMonths[mk] || []).filter(t => t.id !== id);
+  persistMonth(mk);
+}
+
+/** Record what actually arrived for one income occurrence. */
+function setIncomeReceived(mk, row, cents){
+  const list = state.txMonths[mk] || (state.txMonths[mk] = []);
+  const i = list.findIndex(t => t.id === row.id);
+  if (cents <= 0){
+    if (i >= 0) list.splice(i, 1);
+  } else {
+    const rec = {
+      id: row.id, date: row.occDate, payee: row.name, categoryId: row.categoryId,
+      accountId: row.accountId, amount_c: Math.abs(cents),
+      memo: "Income recorded on the budget", cleared: true,
+      satisfies: {recId: row.recId, occDate: row.occDate}
+    };
+    if (i >= 0) list[i] = rec; else list.push(rec);
+  }
+  persistMonth(mk);
+}
+
+/**
+ * Income still expected in month `k`. An occurrence a receipt has already claimed is
+ * dropped, so recording a paycheck moves it from "due" to "in" instead of counting twice.
+ */
+function plannedIncomeFor(k, afterISO, claims){
+  const p = k.split("-").map(Number);
+  const mStart = isoOf(p[0], p[1], 1);
+  const mEnd = isoOf(p[0], p[1], daysInMonth(p[0], p[1]));
+  let sum = 0;
+  for (const r of state.recurrences){
+    if (r.kind !== "income" || !r.amount_c) continue;
+    for (const o of occurrences(r, {max:60, from:mStart, until:mEnd})){
+      if (claims && claims.has(r.id + "|" + o.date)) continue;
+      if (afterISO && o.date <= afterISO) continue;
+      sum += overriddenAmount(r, o.date);
+    }
+  }
+  return sum;
+}
+
+function computeBudget(through){
+  const s = state.settings || blankSettings();
+  const policy = s.overspendPolicy || "carry";
+  const keys = budgetMonthKeys(through);
+  const cats = state.categories;
+  const months = {};
+  const incomeCats = incomeCategoryIds();
+  const asOf = s.asOfDate || todayISO();
+  const curKey = monthKey(asOf);
+  const seedTBB = s.openingTBB_c != null ? s.openingTBB_c : budgetParticipatingCash();
+  const startMonth = s.budgetStartMonth || null;
+  const claims = buildClaims();
+  // Income categories are NOT spendable envelopes — assigning to one would consume
+  // To Be Budgeted, which is the opposite of what a paycheck does.
+  const spendCats = cats.filter(c => !isIncomeCategory(c, incomeCats));
+  let carry = {};                                 // catId -> remaining from the previous month
+  let tbb = seedTBB;
+
+  for (const k of keys){
+    // A declared start month CUTS the chain rather than hiding what came before:
+    // earlier months stay viewable as history, they just stop carrying forward.
+    if (startMonth && k === startMonth){ carry = {}; tbb = seedTBB; }
+    else if (policy === "reset"){
+      // Envelopes are emptied each month. The money is NOT discarded — it goes back
+      // to To Be Budgeted to be assigned again, or the books would stop balancing.
+      let back = 0;
+      for (const c of spendCats) back += carry[c.id] || 0;
+      tbb += back;
+      carry = {};
+    }
+    const budgeted = (state.budgetMonths[k] && state.budgetMonths[k].budgeted) || {};
+    const activity = {};
+    let received = 0;
+    for (const t of (state.txMonths[k] || [])){
+      // A deposit is income when it carries no category or an income one. A positive
+      // amount in an EXPENSE category is a refund and belongs in that category.
+      if (t.amount_c > 0 && (!t.categoryId || incomeCats.has(t.categoryId))){
+        received += t.amount_c;
+        continue;
+      }
+      if (!t.categoryId) continue;
+      activity[t.categoryId] = (activity[t.categoryId] || 0) + t.amount_c;
+    }
+    // A month you have not been paid for yet still has money to budget: add the income
+    // the plan still expects. Closed months get actuals only — that money either came
+    // or it didn't.
+    const expected = k < curKey ? 0 : plannedIncomeFor(k, k === curKey ? asOf : null, claims);
+    const income = received + expected;
+    const carryIn = {}, remaining = {};
+    let budgetedTotal = 0, activityTotal = 0, remainingTotal = 0;
+    for (const c of spendCats){
+      const ci = rollover(carry[c.id] || 0, policy);
+      const b  = budgeted[c.id] || 0;
+      const a  = activity[c.id] || 0;
+      const r  = ci + b + a;
+      carryIn[c.id] = ci; remaining[c.id] = r;
+      budgetedTotal += b; activityTotal += a; remainingTotal += r;
+    }
+    // No clamp at zero: assigning more than you hold is a real state that must persist.
+    tbb = tbb + income - budgetedTotal;
+    months[k] = {key:k, budgeted:budgeted, activity:activity, carryIn:carryIn, remaining:remaining,
+                 income:income, received:received, expected:expected,
+                 tbb:tbb, budgetedTotal:budgetedTotal,
+                 activityTotal:activityTotal, remainingTotal:remainingTotal};
+    carry = remaining;
+  }
+  return {keys:keys, months:months};
+}
+
+/**
+ * The budget a month should start from: the nearest month already budgeted at or
+ * before it, falling back to the recurring plan for someone with no history yet.
+ */
+function budgetTemplateFor(k){
+  const keys = Object.keys(state.budgetMonths).filter(x => x <= k).sort();
+  for (let i = keys.length - 1; i >= 0; i--){
+    const b = state.budgetMonths[keys[i]] && state.budgetMonths[keys[i]].budgeted;
+    if (b && Object.keys(b).length) return b;
+  }
+  const incomeSet = incomeCategoryIds();
+  const out = {};
+  for (const c of state.categories){
+    if (isIncomeCategory(c, incomeSet)) continue;
+    const plan = state.recurrences
+      .filter(r => r.kind === "expense" && r.categoryId === c.id)
+      .reduce((t, r) => t + perMonth(Math.abs(r.amount_c), r.frequency, r.intervalN), 0);
+    if (plan > 0) out[c.id] = plan;
+  }
+  return out;
+}
+
+/**
+ * Keep a rolling window of months budgeted ahead, so there is always something to
+ * look at. Each new month inherits the one before it and is yours to edit; months
+ * you have already touched are never overwritten. Runs at load, so the window
+ * advances on its own as time passes.
+ */
+function ensureBudgetHorizon(){
+  const s = state.settings || blankSettings();
+  const ahead = s.budgetLookaheadMonths == null ? 6 : s.budgetLookaheadMonths;
+  if (ahead <= 0) return [];
+  const made = [];
+  let k = monthKey(s.asOfDate || todayISO());
+  for (let i = 0; i <= ahead; i++){
+    const cur = state.budgetMonths[k] && state.budgetMonths[k].budgeted;
+    if (!cur || !Object.keys(cur).length){
+      const tpl = budgetTemplateFor(shiftMonth(k, -1));
+      if (Object.keys(tpl).length){
+        // budgeted figures carry forward; a one-off income override does not
+        state.budgetMonths[k] = {budgeted: Object.assign({}, tpl), auto: true};
+        made.push(k);
+      }
+    }
+    k = shiftMonth(k, 1);
+  }
+  for (const m of made) persistBudget(m);
+  return made;
+}
+
+/**
+ * The account the mandatory buffer actually lives in.
+ *
+ * Before this existed the buffer was a number typed into settings that claimed to be
+ * "inside the operating account": it raised the floor so the cash was never spent, but
+ * no real account held it, nothing the budget paid into counted toward it, and it earned
+ * nothing. Naming a real savings account makes the buffer a balance instead of a claim —
+ * so every dollar the budget sends there funds it, and it is reached when the money is
+ * genuinely there.
+ */
+function bufferAccount(){
+  return state.accounts.find(a => a.isBuffer && ACCOUNT_KINDS[a.kind] && !ACCOUNT_KINDS[a.kind].debt) || null;
+}
+
+/** Buffer money already put aside, wherever it is being kept. */
+function bufferFunded_c(){
+  const acct = bufferAccount();
+  if (acct) return Math.max(0, acct.openingBalance_c || 0);
+  return (state.settings && state.settings.bufferHeld_c) || 0;
+}
+
+/**
+ * What one income occurrence is expected to pay.
+ *
+ * The recurring row gives the standing figure; a month may override a single
+ * occurrence — a bump, a short cheque, an extra shift. The override is keyed on
+ * {recurrenceId, occurrence date}, the same key the transaction matcher uses, so
+ * moving a payday leaves the old override inert rather than silently reassigning it.
+ *
+ * Everything that asks "what is coming in" goes through here — the income grid, the
+ * budget's expected total, and the cash projection — or the three would disagree.
+ */
+function incomeOverrideKey(recId, occDate){ return recId + "|" + occDate; }
+
+function overriddenAmount(rec, occDate){
+  const m = state.budgetMonths[monthKey(occDate)];
+  const o = m && m.incomeOverrides;
+  if (o){
+    const v = o[incomeOverrideKey(rec.id, occDate)];
+    if (v != null) return Math.abs(v);
+  }
+  return amountOn(rec, occDate);
+}
+
+function setIncomeOverride(mk, recId, occDate, cents){
+  const m = state.budgetMonths[mk] || (state.budgetMonths[mk] = {budgeted:{}});
+  if (!m.incomeOverrides) m.incomeOverrides = {};
+  const k = incomeOverrideKey(recId, occDate);
+  if (cents == null) delete m.incomeOverrides[k];
+  else m.incomeOverrides[k] = Math.abs(cents);
+  if (!Object.keys(m.incomeOverrides).length) delete m.incomeOverrides;
+  persistBudget(mk);
+}
+
+/* ---------- running sums, kept ----------
+ * "451+413+237" is three shopping trips. Storing only 1101 throws away the
+ * question someone will actually ask next month — which trip was which, and
+ * where do I add the fourth. So the text is kept beside the figure and handed
+ * back whenever the cell is opened for editing.
+ *
+ * The figure, never the text, remains the truth. If anything changes the amount
+ * by another route — copying last month, the overage dialog moving money out —
+ * the stored sum no longer adds up to it and is dropped on the spot, because a
+ * breakdown that disagrees with its own total is worse than none.
+ */
+function looksLikeSum(text){
+  return isFormula(text);
+}
+
+/** The sum behind a cell, but only while it still adds up to what is stored. */
+function exprFor(id, cents){
+  const e = state.exprs && state.exprs[id];
+  if (!e) return null;
+  if (toCents(e) !== cents){ delete state.exprs[id]; return null; }
+  return e;
+}
+
+function setExpr(id, text, cents){
+  if (!state.exprs) state.exprs = {};
+  const had = state.exprs[id];
+  if (looksLikeSum(text) && toCents(text) === cents) state.exprs[id] = String(text).trim();
+  else delete state.exprs[id];
+  if (had !== state.exprs[id]) persistCore("exprs");
+}
+
+/** The parts of a formula, for the tooltip. */
+function exprParts(e){
+  let t = String(e).trim();
+  if (t.charAt(0) === "=") t = t.slice(1);
+  const out = [];
+  let sign = 1, cur = "";
+  for (let i = 0; i < t.length; i++){
+    const ch = t[i];
+    if ((ch === "+" || ch === "-") && /[0-9)%]\s*$/.test(cur)){
+      out.push({sign: sign, text: cur.trim()}); sign = (ch === "-") ? -1 : 1; cur = ""; continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push({sign: sign, text: cur.trim()});
+  return out.map(p => ({text: (p.sign < 0 ? "-" : "") + p.text,
+                        cents: p.sign * (evalFormula("=" + p.text) !== null
+                                         ? evalFormula("=" + p.text)
+                                         : oneAmountToCents(p.text))}));
+}
+
+/* ---------- the operator bar ----------
+ * A phone shows the number pad for inputMode "decimal", and that pad has no
+ * = + - * / on it at all. So a formula is simply untypeable on a phone, however
+ * well the evaluator works. This puts the five missing keys on screen whenever a
+ * money cell is open on a touch device, just above the keyboard.
+ *
+ * mousedown/touchstart are cancelled so the tap never steals focus: losing focus
+ * would close the cell, put the total back, and throw away what was being typed.
+ */
+let opbar = null;
+function isTouch(){
+  try { return window.matchMedia && window.matchMedia("(pointer: coarse)").matches; }
+  catch (e){ return false; }
+}
+function opBar(){
+  if (opbar) return opbar;
+  opbar = el("div", "opbar");
+  const keys = [["=", "="], ["+", "+"], ["\u2212", "-"], ["\u00d7", "*"], ["\u00f7", "/"]];
+  for (const k of keys){
+    const b = el("button", "opk", k[0]);
+    b.type = "button";
+    b.dataset.ins = k[1];
+    opbar.appendChild(b);
+  }
+  const done = el("button", "opk opdone", "Done");
+  done.type = "button";
+  opbar.appendChild(done);
+
+  const hold = (ev) => ev.preventDefault();          // keep the caret where it is
+  opbar.addEventListener("mousedown", hold);
+  opbar.addEventListener("touchstart", hold, {passive: false});
+  opbar.addEventListener("click", (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest(".opk") : null;
+    if (!b) return;
+    const i = opbar._target;
+    if (!i) return;
+    if (b === done){ hideOpBar(); try { i.blur(); } catch (e){} return; }
+    const ins = b.dataset.ins;
+    // "=" only ever belongs at the very front, the way a spreadsheet reads it
+    if (ins === "=" ){
+      if (i.value.charAt(0) !== "=") i.value = "=" + i.value;
+      try { i.setSelectionRange(i.value.length, i.value.length); } catch (e){}
+    } else {
+      try {
+        const a = i.selectionStart, z = i.selectionEnd;
+        i.value = i.value.slice(0, a) + ins + i.value.slice(z);
+        i.setSelectionRange(a + 1, a + 1);
+      } catch (e){ i.value += ins; }
+    }
+    try { i.focus(); } catch (e){}
+  });
+  document.body.appendChild(opbar);
+  return opbar;
+}
+function showOpBar(i){
+  if (!isTouch()) return;
+  const bar = opBar();
+  bar._target = i;
+  bar.classList.add("on");
+}
+function hideOpBar(){
+  if (opbar){ opbar.classList.remove("on"); opbar._target = null; }
+}
+
+function budgetParticipatingCash(){
+  let sum = 0;
+  for (const a of state.accounts){
+    const k = ACCOUNT_KINDS[a.kind];
+    if (!k || k.debt) continue;
+    if (a.participatesInBudget === false) continue;
+    sum += a.openingBalance_c || 0;
+  }
+  return sum;
+}
+
+function setBudgeted(mk, catId, cents){
+  if (!state.budgetMonths[mk]) state.budgetMonths[mk] = {budgeted:{}};
+  if (!state.budgetMonths[mk].budgeted) state.budgetMonths[mk].budgeted = {};
+  if (cents) state.budgetMonths[mk].budgeted[catId] = cents;
+  else delete state.budgetMonths[mk].budgeted[catId];
+  persistBudget(mk);
+}
+
+/**
+ * The Actual column stays typable, per the brief ("the user enters actual things
+ * paid for in the actual column"). Typing here writes ONE reconciling transaction
+ * so the ledger remains the single store; real rows entered on the Transactions
+ * tab are preserved and only the difference is adjusted.
+ */
+function setActual(mk, catId, outflow_c){
+  const list = state.txMonths[mk] || (state.txMonths[mk] = []);
+  const rid = "t-adj-" + catId + "-" + mk;
+  const others = list.filter(t => t.categoryId === catId && t.id !== rid);
+  const otherSum = others.reduce((sum, t) => sum + t.amount_c, 0);
+  const need = -outflow_c - otherSum;
+  const i = list.findIndex(t => t.id === rid);
+  if (Math.abs(need) < 1){
+    if (i >= 0) list.splice(i, 1);
+  } else if (i >= 0){
+    list[i].amount_c = need;
+  } else {
+    const acct = state.accounts.find(a => a.kind === "cash") || state.accounts[0];
+    list.push({id:rid, date: mk + "-15", payee:"Quick entry", categoryId:catId,
+               accountId: acct ? acct.id : "", amount_c:need, memo:"Typed into the Actual column",
+               cleared:false, quick:true});
+  }
+  persistMonth(mk);
+}
+
+/* ============================================================
+   3b. DAILY SIMULATOR (M3)
+   One deterministic pass, integer cents, one day at a time. Minimums only —
+   no goal allocation yet, that arrives at M6. Everything the dashboard shows
+   is read off this single run, so there is no second forecast to drift.
+   ============================================================ */
+
+function isLeap(y){ return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
+function daysInYear(isoDate){ return isLeap(ymd(isoDate).y) ? 366 : 365; }
+
+const COMPOUND_MONTHS = {monthly:1, quarterly:3, semiannual:6, annual:12};
+
+/**
+ * Sinking funds, as the simulator carries them (M5).
+ * An earmarked category accumulates its monthly budget and is drawn down by its own
+ * bills. That accumulating balance is real cash sitting in checking that is already
+ * spoken for — so it joins the floor. Without this the money looks spare right up
+ * until the bill lands, which is exactly how the old workbook misread a $5,800
+ * semi-annual insurance premium as available surplus.
+ */
+function earmarkedEnvelopes(){
+  const s = state.settings || blankSettings();
+  const mk = monthKey(s.asOfDate || todayISO());
+  let M = null;
+  try { M = computeBudget(mk).months[mk]; } catch (e){ M = null; }
+  const out = [];
+  for (const c of state.categories){
+    if (!c.isEarmarked) continue;
+    const start = M ? Math.max(0, M.remaining[c.id] || 0) : 0;
+    const recs = state.recurrences.filter(r => r.kind === "expense" && r.categoryId === c.id);
+
+    // Accumulate ONLY where there is a bill to save for. A category with no recurring
+    // expense has nothing to build toward, and topping it up every month would inflate
+    // the floor without bound. Its existing balance is still real, reserved money.
+    const monthly = Math.max(0, recs.reduce(
+      (t, r) => t + perMonth(Math.abs(r.amount_c), r.frequency, r.intervalN), 0));
+
+    // A sinking fund tops out at the bill it is saving for, then is spent and refills.
+    const cap = recs.reduce((m, r) => Math.max(m, Math.abs(r.amount_c)), 0);
+
+    if (!start && !monthly) continue;
+    out.push({catId:c.id, name:c.name, start_c:start,
+              monthly_c: recs.length ? monthly : 0,
+              cap_c: cap ? Math.max(cap, start) : start});
+  }
+  return out;
+}
+
+function horizonDays(){
+  const s = state.settings || {};
+  let n = Math.round((s.horizonYears || 3) * 365.25);
+  const today = s.asOfDate || todayISO();
+  for (const g of state.goals){
+    if (g.targetDate) n = Math.max(n, diffDays(today, g.targetDate) + 180);
+  }
+  return Math.max(365, Math.min(n, 18263));       // up to 50 years
+}
+
+/** Progress toward a goal, reading an account balance where one is linked. */
+function goalProgress(g, sim){
+  if (g.accountId != null){
+    const a = sim.accts.find(x => x.id === g.accountId);
+    if (a) return g.kind === "payoff" ? (g.target_c + a.bal) : a.bal;
+  }
+  return g.funded_c + (sim.funded[g.id] || 0);
+}
+
+function simulate(opts){
+  const o = opts || {};
+  const s = state.settings || blankSettings();
+  const start = s.asOfDate || todayISO();
+  const nDays = o.days || horizonDays();
+  const end = addDays(start, nDays);
+  // The floor is the hard zero-guard PLUS any buffer already sitting in the operating
+  // account. Buffer money is in the cash balance but is not spendable, so the projection
+  // must not quietly consume it. Earmarked sinking funds join this at M5.
+  const guard_c = s.operatingFloor_c || 0;
+  // Buffer kept in its own account is not in the operating balance, so there is nothing
+  // to protect there. Adding it to the floor as well would reserve the money twice.
+  const held_c = bufferAccount() ? 0 : (s.bufferHeld_c || 0);
+  const envelopes = (o.envelopes === false) ? [] : earmarkedEnvelopes();
+  for (const e of envelopes) e.bal = e.start_c;
+  const floorBase_c = guard_c + held_c;
+
+  const accts = state.accounts.map(a => Object.assign({}, a, {bal: a.openingBalance_c || 0}));
+  const idx = {};
+  accts.forEach((a, i) => { idx[a.id] = i; });
+  const op = accts.find(a => a.kind === "cash") || accts[0] || null;
+  const opIdx = op ? idx[op.id] : -1;
+
+  // ---- expand every recurrence into day-indexed postings, once ----
+  const flows = new Map();
+  const push = (d, ai, amt, catId) => {
+    if (ai == null || ai < 0) return;
+    if (!flows.has(d)) flows.set(d, []);
+    flows.get(d).push({ai:ai, amt:amt, catId:catId || null});
+  };
+  const envByCat = {};
+  for (const e of envelopes) envByCat[e.catId] = e;
+
+  // The current month posts what the BUDGET still expects, not the raw plan — money
+  // already spent is already out of the opening balance, so re-posting it would
+  // double-count it. This is the seam that makes typing a receipt move the graph.
+  const curMonth = monthKey(start);
+  let curRemaining = null;
+  if (o.effectiveOutflow !== false){
+    try {
+      const M = computeBudget(curMonth).months[curMonth];
+      if (M) curRemaining = M;
+    } catch (e){ curRemaining = null; }
+  }
+
+  const claims = (o.claims === false) ? null : buildClaims();
+  const governed = (catId, dateISO) =>
+    !!(curRemaining && catId && monthKey(dateISO) === curMonth && curRemaining.budgeted[catId] != null);
+
+  for (const r of state.recurrences){
+    const ai = idx[r.accountId];
+    if (ai == null) continue;
+    const sign = r.kind === "income" ? 1 : -1;
+    for (const occ of occurrences(r, {max:6000, from:start, until:end})){
+      const d = diffDays(start, occ.date);
+      if (d < 0 || d > nDays) continue;
+      // suppress this month's raw expense postings where the budget governs instead
+      if (r.kind === "expense" && governed(r.categoryId, occ.date)) continue;
+      // …and suppress any occurrence a real transaction has already paid
+      if (claims && claims.has(r.id + "|" + occ.date)) continue;
+      push(d, ai, sign * (r.kind === "income" ? overriddenAmount(r, occ.date)
+                                               : amountOn(r, occ.date)), r.categoryId);
+    }
+  }
+
+  // Real transactions dated strictly AFTER the as-of date. The opening balances are
+  // "as of" that date, so anything on or before it is already inside them; posting it
+  // again would charge it twice. Budget-governed categories are skipped because their
+  // activity is already folded into the remaining figure posted below.
+  if (o.actuals !== false){
+    for (const mk of Object.keys(state.txMonths)){
+      for (const t of state.txMonths[mk]){
+        if (!t.date || t.date <= start) continue;
+        const ai = idx[t.accountId];
+        if (ai == null || !t.amount_c) continue;
+        if (governed(t.categoryId, t.date)) continue;
+        const d = diffDays(start, t.date);
+        if (d >= 0 && d <= nDays) push(d, ai, t.amount_c, t.categoryId);
+      }
+    }
+  }
+
+  // …and post each governed category's remaining budget once, at its next due date.
+  // A category with a budget but NO recurring bill still has to spend its money:
+  // falling through here would quietly delete it from the projection.
+  if (curRemaining){
+    const monthEnd = isoOf(ymd(start).y, ymd(start).m, daysInMonth(ymd(start).y, ymd(start).m));
+    const opAcct = accts.find(a => a.kind === "cash") || accts[0] || null;
+    for (const c of state.categories){
+      if (curRemaining.budgeted[c.id] == null) continue;
+      // What is still expected to leave THIS month: this month's assignment less what
+      // has already been spent against it. Deliberately not `remaining`, which also
+      // carries balances accumulated in earlier months — that money is set aside for
+      // later bills, and treating it as due this month empties the account on paper.
+      const left = Math.max(0, (curRemaining.budgeted[c.id] || 0) + (curRemaining.activity[c.id] || 0));
+      if (left <= 0) continue;
+      const rec = state.recurrences.find(r => r.kind === "expense" && r.categoryId === c.id && idx[r.accountId] != null);
+      let when, ai;
+      if (rec){
+        const nxt = occurrences(rec, {max:1, from:start, until:monthEnd})[0];
+        when = nxt ? nxt.date : monthEnd;
+        ai = idx[rec.accountId];
+      } else {
+        when = monthEnd;                                  // no bill to hang it on
+        ai = opAcct ? idx[opAcct.id] : null;
+      }
+      if (ai == null) continue;
+      const d = diffDays(start, when);
+      if (d >= 0 && d <= nDays) push(d, ai, -left, c.id);
+    }
+  }
+  // mandatory contributions move cash out of the operating account and into the asset
+  for (const a of accts){
+    const c = a.contribution;
+    if (!c || !c.amount_c || !c.mandatory) continue;
+    const shim = {frequency: c.frequency || "MONTHLY", anchorDate: start, endDate: null,
+                  businessDayPolicy: "none", monthEndPolicy: "clamp", intervalN: 1};
+    for (const occ of occurrences(shim, {max:6000, from:start, until:end})){
+      const d = diffDays(start, occ.date);
+      if (d < 0 || d > nDays) continue;
+      push(d, idx[a.id], c.amount_c);
+      push(d, opIdx, -c.amount_c);
+    }
+  }
+
+  const cash = [], net = [], liab = [], save = [], inv = [], floorSeries = [];
+  const events = [];
+  const funded = {}, achieved = {}, applied = {};
+  let totalInterest = 0;
+  let low = {v: Infinity, d: 0};
+  let lowMargin = Infinity;
+  let reserved_c = 0;               // committed to goals that have no account to sit in
+  // opts.track: per-account balance series, needed by the deadline sizer for growth goals
+  let track = null;
+  if (o.track && o.track.length){
+    track = {};
+    for (const id of o.track) if (idx[id] != null) track[id] = new Float64Array(nDays + 1);
+    if (!Object.keys(track).length) track = null;
+  }
+  let debtFreeDay = null;
+  let hadDebt = accts.some(a => ACCOUNT_KINDS[a.kind] && ACCOUNT_KINDS[a.kind].debt && a.bal < 0);
+  let breachDay = null;
+  const startYM = ymd(start);
+
+  for (let d = 0; d <= nDays; d++){
+    const date = addDays(start, d);
+    const a = ymd(date);
+    const dim = daysInMonth(a.y, a.m);
+
+    // 0. sinking funds: top up on the 1st, then let today's bills draw them down
+    if (d > 0 && a.d === 1) for (const e of envelopes)
+      e.bal = Math.min(e.cap_c, e.bal + e.monthly_c);
+
+    // 1. scheduled flows
+    const fs = flows.get(d);
+    if (fs) for (const f of fs){
+      accts[f.ai].bal += f.amt;
+      if (f.amt < 0 && f.catId && envByCat[f.catId]){
+        const e = envByCat[f.catId];
+        e.bal = Math.max(0, e.bal + f.amt);      // an envelope never goes below zero
+      }
+    }
+
+    let earmarked_c = 0;
+    for (const e of envelopes) earmarked_c += Math.max(0, e.bal);
+
+    // 2. interest / growth
+    if (d > 0) for (const ac of accts){
+      const kind = ACCOUNT_KINDS[ac.kind];
+      if (!kind || !ac.apr_bps || !ac.bal) continue;
+      // A card cleared in full every cycle never leaves the grace period, so it
+      // never accrues interest. Charging it would overstate the cost of floating.
+      if (kind.debt && ac.paymentMode === "full") continue;
+      const rate = ac.apr_bps / 10000;
+      const comp = ac.compounding || "monthly";
+      let delta = 0;
+      if (comp === "daily"){
+        delta = kind.debt
+          ? Math.round(ac.bal * rate / daysInYear(date))                 // nominal, ACT/365 or 366
+          : Math.round(ac.bal * (Math.pow(1 + rate, 1 / 365) - 1));      // geometric for assets
+      } else {
+        const months = COMPOUND_MONTHS[comp] || 1;
+        const due = Math.min(ac.dueDay || 1, dim);
+        const elapsed = (a.y - startYM.y) * 12 + (a.m - startYM.m);
+        if (a.d === due && elapsed % months === 0) delta = Math.round(ac.bal * rate * months / 12);
+      }
+      if (delta){
+        ac.bal += delta;
+        if (kind.debt) totalInterest -= delta;   // delta is negative on a debt
+      }
+    }
+
+    // 3. debt payments.
+    //    'full'    — a card used to smooth spending and cleared every payday. The whole
+    //                balance goes, so it never revolves and never accrues interest.
+    //    'minimum' — a contractual minimum. Capped at what is owed, so a payoff landing
+    //                today suppresses the minimum automatically.
+    //    Escrow (taxes + insurance inside a mortgage payment) leaves cash but never
+    //    touches the balance — getting this wrong swings a payoff date by years.
+    for (const ac of accts){
+      const kind = ACCOUNT_KINDS[ac.kind];
+      if (!kind || !kind.debt || !ac.dueDay) continue;
+      if (Math.min(ac.dueDay, dim) !== a.d) continue;
+      if (ac.bal >= 0) continue;
+
+      if (ac.paymentMode === "full"){
+        const pay = -ac.bal;
+        ac.bal = 0;
+        if (opIdx >= 0) accts[opIdx].bal -= pay;
+        continue;                                   // cleared, not "paid off" — it will be used again
+      }
+
+      if (!ac.minPayment_c) continue;
+      const escrow = Math.min(ac.escrow_c || 0, ac.minPayment_c);
+      const toPrincipal = Math.min(ac.minPayment_c - escrow, -ac.bal);
+      ac.bal += toPrincipal;
+      if (opIdx >= 0) accts[opIdx].bal -= (toPrincipal + escrow);
+      if (ac.bal === 0) events.push({d:d, date:date, text:ac.name + " paid off"});
+    }
+
+    // 3b. solver commitments — surplus deliberately deployed on this day
+    const cm = o.commits && o.commits.get(d);
+    if (cm) for (const x of cm){
+      if (achieved[x.goalId]) continue;          // already met — stop pouring money in
+      let amt = x.amount_c;
+      if (amt <= 0) continue;
+      let tgt = null;
+      if (x.accountId != null && idx[x.accountId] != null){
+        tgt = accts[idx[x.accountId]];
+        const tk = ACCOUNT_KINDS[tgt.kind];
+        // Never pay a debt past zero. Minimum payments are also chipping away at it,
+        // so a plan sized against the original balance would otherwise overshoot and
+        // turn the loan into a phantom asset earning its own interest rate.
+        if (tk && tk.debt) amt = Math.min(amt, Math.max(0, -tgt.bal));
+      }
+      if (amt <= 0) continue;                    // nothing owed: the cash simply stays put
+      if (tgt){
+        accts[opIdx >= 0 ? opIdx : 0].bal -= amt;
+        tgt.bal += amt;
+      } else {
+        // No account to move it to, so the money STAYS in checking and is merely
+        // reserved. Debiting cash with no counterparty would destroy it outright —
+        // that bug quietly made the solved plan poorer than doing nothing.
+        reserved_c += amt;
+      }
+      funded[x.goalId] = (funded[x.goalId] || 0) + amt;
+      if (!applied[x.goalId]) applied[x.goalId] = [];
+      applied[x.goalId].push({d:d, date:date, amount_c:amt});
+    }
+
+    // 3c. goal achievement, recorded inside the loop by exact integer comparison
+    if (o.goals) for (const g of o.goals){
+      if (achieved[g.id]) continue;
+      // A goal tied to an account is measured by that account's BALANCE, so compound
+      // growth counts toward it. Contributions alone would never reach a target that
+      // the return is meant to do most of the work on — and reading the rate off the
+      // account rather than off the goal keeps one source of truth for it.
+      let done = false;
+      if (g.accountId != null && idx[g.accountId] != null){
+        const b = accts[idx[g.accountId]].bal;
+        done = (g.kind === "payoff") ? b >= 0 : b >= g.target_c;
+      } else {
+        done = (g.funded_c + (funded[g.id] || 0)) >= g.target_c;
+      }
+      if (done){
+        achieved[g.id] = {d:d, date:date};
+        events.push({d:d, date:date, text:g.name});
+      }
+    }
+
+    // The floor is computed AFTER commits, because money reserved for an unlinked goal
+    // is still sitting in checking and must not be spent again.
+    const floorToday = floorBase_c + earmarked_c + reserved_c;
+    floorSeries.push(floorToday);
+    if (track) for (const id of Object.keys(track)) track[id][d] = accts[idx[id]].bal;
+
+    // 4. record
+    let c = 0, l = 0, sv = 0, iv = 0;
+    for (const ac of accts){
+      const k = ACCOUNT_KINDS[ac.kind];
+      if (!k) continue;
+      if (k.debt) l += ac.bal;
+      else if (ac.kind === "investment") iv += ac.bal;
+      else if (ac.kind === "savings") sv += ac.bal;
+      else c += ac.bal;
+    }
+    cash.push(c); liab.push(l); save.push(sv); inv.push(iv); net.push(c + sv + iv + l);
+    // "lowest" is measured as margin ABOVE the floor, because the floor itself moves
+    const margin = c - floorToday;
+    if (margin < lowMargin){ lowMargin = margin; low = {v:c, d:d}; }
+    if (breachDay === null && margin < 0) breachDay = d;
+    if (hadDebt && debtFreeDay === null && l === 0){
+      debtFreeDay = d;
+      events.push({d:d, date:date, text:"Debt free"});
+    }
+  }
+
+  return {
+    start:start, nDays:nDays, guard_c:guard_c, held_c:held_c,
+    floor_c: floorSeries[0] || floorBase_c,   // today's floor, for headline display
+    floorBase_c: floorBase_c, floorSeries: floorSeries,
+    envelopes: envelopes, lowMargin: lowMargin,
+    cash:cash, net:net, liab:liab, save:save, inv:inv,
+    accts:accts, totalInterest:totalInterest,
+    low:{v:low.v, d:low.d, date:addDays(start, low.d), margin:lowMargin},
+    breach: breachDay === null ? null : {d:breachDay, date:addDays(start, breachDay)},
+    debtFree: debtFreeDay === null ? null : {d:debtFreeDay, date:addDays(start, debtFreeDay)},
+    events:events, opName: op ? op.name : "—",
+    funded:funded, achieved:achieved, applied:applied, opIdx:opIdx, track:track
+  };
+}
+
+/* ============================================================
+   3c. THE SOLVER (M6)
+   Free cash is deployed on real paydays. Safe-to-commit on any date is the
+   MINIMUM PROJECTED FUTURE BALANCE above the floor — the workbook's one genuinely
+   good idea, computed there with 1,096 SMALL() calls over shrinking ranges and
+   here with a single backward pass.
+
+   Honest about what this is: the floor is asserted exactly, but ordering below
+   that is a heuristic — priority tier first, then avalanche by rate. Deadline
+   scheduling (EDF) is M7.
+   ============================================================ */
+
+function buildGoalList(){
+  const s = state.settings || blankSettings();
+  const d = derive();
+  const out = [];
+
+  const bufTarget = d.bufferBasisM;
+  const bufAcct = bufferAccount();
+  const held = bufferFunded_c();
+  if (bufTarget > held){
+    // Linked to a real account when one is named, so the money goes somewhere, earns the
+    // account's rate, and anything the budget already pays in counts toward the target.
+    out.push({id:"g-buffer-1mo", name:"Savings buffer — 1 month", priority:0, kind:"savings",
+              target_c:bufTarget, funded_c:held,
+              accountId: bufAcct ? bufAcct.id : null,
+              apr_bps: bufAcct ? (bufAcct.apr_bps || 0) : 0,
+              locked:true, targetDate:null, exclusive:true,
+              unlinked: !bufAcct});
+  }
+  for (const g of state.goals){
+    const acct = state.accounts.find(a => a.id === g.linkedAccountId) || null;
+    let target = g.targetAmount_c || 0, funded = 0, apr = 0;
+    if (g.kind === "payoff" && acct){
+      target = Math.abs(Math.min(0, acct.openingBalance_c));
+      apr = acct.apr_bps || 0;
+    } else if (acct){
+      funded = Math.max(0, acct.openingBalance_c || 0);
+      apr = acct.apr_bps || 0;
+    }
+    if (target <= funded) continue;
+    // A card cleared in full each cycle is never a payoff target — it clears by itself.
+    if (g.kind === "payoff" && acct && acct.paymentMode === "full") continue;
+    out.push({id:g.id, name:g.name || "(unnamed)", priority:(g.priority == null ? 500 : g.priority),
+              kind:g.kind, target_c:target, funded_c:funded,
+              accountId: acct ? acct.id : null, apr_bps:apr, locked:false,
+              targetDate:g.targetDate || null, exclusive:false,
+              unlinked: !acct && g.kind !== "payoff"});
+  }
+
+  // The sweep account takes everything left once every goal is funded, so surplus
+  // compounds instead of idling as cash. Effectively bottomless, and always last.
+  const sweep = state.accounts.find(a => a.isSweep && ACCOUNT_KINDS[a.kind] && !ACCOUNT_KINDS[a.kind].debt);
+  if (sweep){
+    out.push({id:"g-sweep", name:sweep.name, priority:9999, kind:"invest",
+              target_c:SWEEP_TARGET, funded_c:Math.max(0, sweep.openingBalance_c || 0),
+              accountId:sweep.id, apr_bps:sweep.apr_bps || 0, locked:false,
+              targetDate:null, exclusive:false, isSweep:true, unlinked:false});
+  }
+  return out;
+}
+
+/** A target no plan will ever reach, so the sweep goal never closes. */
+const SWEEP_TARGET = 1e15;
+
+/** Stamp each goal with its deadline as a day index, clamped into the horizon. */
+function stampDeadlines(goals, start, nDays){
+  for (const g of goals){
+    if (!g.targetDate){ g.deadlineDay = null; g.overdue = false; continue; }
+    const d = diffDays(start, g.targetDate);
+    g.overdue = d < 0;
+    g.deadlineDay = Math.max(0, Math.min(d, nDays));
+    g.beyondHorizon = d > nDays;
+  }
+  return goals;
+}
+
+/** Marginal value of a dollar sent here this period, in basis points a year. */
+function marginalValue(g){
+  if (g.kind === "payoff") return g.apr_bps || 0;      // avalanche
+  if (g.locked) return 1000000;                        // the buffer outranks everything
+  return g.apr_bps || 0;
+}
+
+function allocationDays(start, nDays){
+  const set = new Set();
+  const end = addDays(start, nDays);
+  for (const r of state.recurrences){
+    if (r.kind !== "income") continue;
+    for (const o of occurrences(r, {max:4000, from:start, until:end})){
+      const d = diffDays(start, o.date);
+      if (d >= 0 && d <= nDays) set.add(d);
+    }
+  }
+  if (!set.size){                                       // no income rows: fall back to the 1st and 15th
+    for (let d = 0; d <= nDays; d++){
+      const day = ymd(addDays(start, d)).d;
+      if (day === 1 || day === 15) set.add(d);
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+/* ============================================================
+   3d. DEADLINE SCHEDULING (M7)
+   Reserves capacity for DATED goals before the ASAP waterfall runs. It never
+   changes how much a payday spends — only how that day's pot is partitioned —
+   so the floor gate in solve() remains authoritative.
+   ============================================================ */
+
+/** Calendar facts per day, built in one walk with no Date construction. */
+function dayTable(start, nDays){
+  const Y = new Int16Array(nDays + 1), M = new Int8Array(nDays + 1), D = new Int8Array(nDays + 1),
+        DIM = new Int8Array(nDays + 1), DIY = new Int16Array(nDays + 1);
+  const a = ymd(start);
+  let y = a.y, m = a.m, d = a.d;
+  let dim = daysInMonth(y, m), diy = isLeap(y) ? 366 : 365;
+  for (let i = 0; i <= nDays; i++){
+    Y[i] = y; M[i] = m; D[i] = d; DIM[i] = dim; DIY[i] = diy;
+    d++;
+    if (d > dim){
+      d = 1; m++;
+      if (m > 12){ m = 1; y++; diy = isLeap(y) ? 366 : 365; }
+      dim = daysInMonth(y, m);
+    }
+  }
+  return {Y:Y, M:M, D:D, DIM:DIM, DIY:DIY};
+}
+
+/** Cumulative growth factor for an asset account, mirroring simulate's interest step. */
+function growthCurve(acct, T, nDays){
+  const G = new Float64Array(nDays + 1);
+  G[0] = 1;
+  const rate = (acct && acct.apr_bps ? acct.apr_bps : 0) / 10000;
+  const comp = (acct && acct.compounding) || "monthly";
+  const months = COMPOUND_MONTHS[comp] || 1;
+  const y0 = T.Y[0], m0 = T.M[0];
+  for (let d = 1; d <= nDays; d++){
+    let f = 1;
+    if (rate){
+      if (comp === "daily") f = Math.pow(1 + rate, 1 / 365);
+      else {
+        const due = Math.min((acct.dueDay || 1), T.DIM[d]);
+        const elapsed = (T.Y[d] - y0) * 12 + (T.M[d] - m0);
+        if (T.D[d] === due && elapsed % months === 0) f = 1 + rate * months / 12;
+      }
+    }
+    G[d] = G[d - 1] * f;
+  }
+  return G;
+}
+
+/**
+ * The day a debt reaches zero given a constant extra payment C on allocation days.
+ * A single-account replay whose arithmetic matches simulate exactly, so bisecting on
+ * it costs one array walk instead of a full ledger run.
+ */
+function payoffDayFor(acct, C, isAllocDay, T, D){
+  if (!acct || acct.paymentMode === "full") return 0;
+  let bal = acct.openingBalance_c || 0;
+  if (bal >= 0) return 0;
+  const rate = (acct.apr_bps || 0) / 10000;
+  const comp = acct.compounding || "monthly";
+  const months = COMPOUND_MONTHS[comp] || 1;
+  const y0 = T.Y[0], m0 = T.M[0];
+  const escrow = Math.min(acct.escrow_c || 0, acct.minPayment_c || 0);
+  for (let d = 0; d <= D; d++){
+    if (d > 0 && rate && bal){
+      if (comp === "daily") bal += Math.round(bal * rate / T.DIY[d]);
+      else {
+        const due = Math.min(acct.dueDay || 1, T.DIM[d]);
+        const elapsed = (T.Y[d] - y0) * 12 + (T.M[d] - m0);
+        if (T.D[d] === due && elapsed % months === 0) bal += Math.round(bal * rate * months / 12);
+      }
+    }
+    if (acct.dueDay && bal < 0 && Math.min(acct.dueDay, T.DIM[d]) === T.D[d]){
+      bal += Math.min(Math.max(0, (acct.minPayment_c || 0) - escrow), -bal);
+    }
+    if (isAllocDay[d] && bal < 0 && C > 0) bal += Math.min(C, -bal);
+    if (bal >= 0) return d;
+  }
+  return Infinity;
+}
+
+/** Smallest per-payday extra payment that clears the debt by day D. 0 = already will. */
+function requiredPayoff(acct, isAllocDay, T, D){
+  if (payoffDayFor(acct, 0, isAllocDay, T, D) <= D) return 0;
+  const bal0 = -(acct.openingBalance_c || 0);
+  const rate = (acct.apr_bps || 0) / 10000;
+  const hiCap = Math.ceil(bal0 * Math.pow(1 + rate, (D + 1) / 365)) + 1;
+  if (payoffDayFor(acct, hiCap, isAllocDay, T, D) > D) return Infinity;   // impossible by then
+  let lo = 0, hi = hiCap, guard = 0;
+  while (hi - lo > 1 && guard++ < 48){
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (payoffDayFor(acct, mid, isAllocDay, T, D) <= D) hi = mid; else lo = mid;
+  }
+  return hi;
+}
+
+/** Integer split of `need` over n periods; the odd cents go to the earliest days. */
+function levelSplit(need, n){
+  if (n <= 0) return [];
+  const base = Math.floor(need / n), rem = need - base * n;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) out[i] = base + (i < rem ? 1 : 0);
+  return out;
+}
+
+/**
+ * What each dated goal needs per payday. For a growing account the divisor is the
+ * sum of G[D]/G[k] over the window, which is the generalised annuity — it collapses
+ * to plain division when the rate is zero, and unlike the textbook formula it is
+ * correct for irregularly spaced paydays, which is the normal case here.
+ */
+function requiredPerPayday(g, win, ctx){
+  if (!win.length) return Infinity;
+  if (g.kind === "payoff" && g.accountId){
+    const acct = state.accounts.find(a => a.id === g.accountId);
+    return requiredPayoff(acct, ctx.isAlloc, ctx.T, g.deadlineDay);
+  }
+  const G = g.accountId ? ctx.growth[g.accountId] : null;
+  const atDeadline = (g.accountId && ctx.baseTrack && ctx.baseTrack[g.accountId])
+    ? ctx.baseTrack[g.accountId][g.deadlineDay]
+    : g.funded_c;
+  const shortfall = g.target_c - atDeadline + (ctx.slip[g.id] || 0);
+  if (shortfall <= 0) return 0;
+  let S = 0;
+  for (const k of win) S += G ? (G[g.deadlineDay] / G[k]) : 1;
+  if (S <= 0) return Infinity;
+  return Math.ceil(shortfall / S) + 1;         // +1 cent absorbs the float in G
+}
+
+/** What the locked buffer will take on each payday, so reservations never evict it. */
+function bufferClaims(perDay, A, goals, caps){
+  const out = {};
+  const buf = goals.find(g => g.exclusive);
+  if (!buf) return out;
+  const cap = caps && caps[buf.id] != null ? buf.funded_c + caps[buf.id] : buf.target_c;
+  let funded = buf.funded_c;
+  for (const k of A){
+    if (funded >= cap) break;
+    const take = Math.min(perDay[k] || 0, cap - funded);
+    if (take > 0){ out[k] = take; funded += take; }
+  }
+  return out;
+}
+
+/**
+ * Reserve capacity for dated goals, earliest deadline first.
+ * EDF is optimal for meeting deadlines on a single fungible preemptible resource.
+ * That argument is exact for savings goals; for a debt it is a good heuristic only,
+ * because paying early also changes future capacity. The UI says so.
+ */
+function buildReservations(perDay, A, goals, ctx, caps){
+  const dated = goals.filter(g => !g.exclusive && g.deadlineDay != null && g.deadlineDay >= 0);
+  const res = new Map();
+  const notes = {};
+  if (!dated.length) return {res:res, notes:notes};
+
+  const bufWant = bufferClaims(perDay, A, goals, caps);
+  const avail = {};
+  for (const k of A) avail[k] = Math.max(0, (perDay[k] || 0) - (bufWant[k] || 0));
+
+  const order = dated.slice().sort((a, b) =>
+    (a.deadlineDay - b.deadlineDay) ||
+    (a.priority - b.priority) ||
+    ((b.target_c - b.funded_c) - (a.target_c - a.funded_c)) ||
+    (ctx.order0[a.id] - ctx.order0[b.id]));
+
+  const used = {};
+  for (const g of order){
+    const win = A.filter(k => k <= g.deadlineDay);
+    if (!win.length){ notes[g.id] = {reason:"no payday falls before that date"}; continue; }
+    const C = requiredPerPayday(g, win, ctx);
+    if (C === 0) continue;                       // already on track without reserving
+    if (!Number.isFinite(C)){ notes[g.id] = {reason:"unreachable by that date at any rate"}; continue; }
+
+    const G = (g.kind !== "payoff" && g.accountId) ? ctx.growth[g.accountId] : null;
+    const D = g.deadlineDay;
+    const atDeadline = (g.accountId && ctx.baseTrack && ctx.baseTrack[g.accountId])
+      ? ctx.baseTrack[g.accountId][D] : g.funded_c;
+    const need = g.kind === "payoff"
+      ? Infinity                                  // a debt is sized by the payment, not a total
+      : Math.max(0, g.target_c - atDeadline + (ctx.slip[g.id] || 0));
+
+    const take = (k, want) => {
+      const room = Math.max(0, avail[k] - (used[k] || 0));
+      const give = Math.min(want, room);
+      if (give <= 0) return 0;
+      used[k] = (used[k] || 0) + give;
+      if (!res.has(k)) res.set(k, []);
+      res.get(k).push({goalId:g.id, amount_c:give});
+      return give;
+    };
+
+    if (g.kind === "payoff"){
+      // a level extra payment on every payday in the window
+      let short = 0;
+      for (const k of win) short += C - take(k, C);
+      if (short > 0) notes[g.id] = {reason:"other goals hold the capacity first",
+                                    reservedPerPayday_c:C, shortPerPayday_c: Math.round(short / win.length)};
+      continue;
+    }
+
+    // Value delivered AT THE DEADLINE, so a contribution made early is credited with
+    // the growth it will have earned by then.
+    let delivered = 0;
+    const factor = (k) => (G ? G[D] / G[k] : 1);
+    for (const k of win){                          // pass 1: the level schedule
+      if (delivered >= need) break;
+      const cap = Math.ceil((need - delivered) / factor(k));
+      delivered += take(k, Math.min(C, cap)) * factor(k);
+    }
+    for (const k of win){                          // pass 2: top up wherever room is left
+      if (delivered >= need) break;
+      const cap = Math.ceil((need - delivered) / factor(k));
+      delivered += take(k, cap) * factor(k);
+    }
+    if (delivered < need){
+      notes[g.id] = {reason:"not enough spare cash before that date",
+                     reservedPerPayday_c:C,
+                     shortfallAtDeadline_c: Math.round(need - delivered)};
+    }
+  }
+  return {res:res, notes:notes};
+}
+
+function solve(opts){
+  const o = opts || {};
+  const s = state.settings || blankSettings();
+  const goals = buildGoalList();
+  const trackIds = goals.filter(g => g.accountId && g.kind !== "payoff").map(g => g.accountId);
+  const base = simulate({goals:goals, track:trackIds});
+  const A = allocationDays(base.start, base.nDays);
+  const fraction = Math.max(0.05, Math.min(1, o.fraction == null ? 1 : o.fraction));
+  stampDeadlines(goals, base.start, base.nDays);
+
+  if (!goals.length || !A.length){
+    return {sim:base, base:base, goals:goals, plan:[], A:A, iterations:0, infeasible:[], notes:{}};
+  }
+
+  // --- deadline context, built once and reused by every pass ---
+  const T = dayTable(base.start, base.nDays);
+  const isAlloc = new Uint8Array(base.nDays + 1);
+  for (const k of A) isAlloc[k] = 1;
+  const growth = {};
+  for (const g of goals){
+    if (g.accountId && g.kind !== "payoff" && !growth[g.accountId]){
+      const acct = state.accounts.find(a => a.id === g.accountId);
+      growth[g.accountId] = growthCurve(acct, T, base.nDays);
+    }
+  }
+  const order0 = {};
+  state.goals.forEach((g, i) => { order0[g.id] = i; });
+  order0["g-buffer-1mo"] = -1;
+  const ctx = {T:T, isAlloc:isAlloc, growth:growth, order0:order0,
+               baseTrack: base.track, slip:{}, nDays:base.nDays};
+  let notes = {};
+
+  let commitPerDay = new Array(base.nDays + 1).fill(0);
+  let last = base;
+  let best = null;                   // the newest floor-safe result
+  let converged = true;
+  let iterations = 0;
+  const caps = {};                   // what each goal was actually able to absorb
+
+  for (let iter = 0; iter < 8; iter++){
+    iterations++;
+    // ---- capacity: one backward suffix-minimum pass over slack ----
+    // slack is measured against the floor AS IT MOVES — sinking funds build up and
+    // draw down, so a single scalar floor would be wrong on most days
+    const slack = new Array(last.nDays + 1);
+    for (let d = 0; d <= last.nDays; d++) slack[d] = last.cash[d] - (last.floorSeries[d] || last.floorBase_c);
+    const suf = new Array(last.nDays + 1);
+    suf[last.nDays] = slack[last.nDays];
+    for (let d = last.nDays - 1; d >= 0; d--) suf[d] = Math.min(slack[d], suf[d + 1]);
+
+    const next = new Array(base.nDays + 1).fill(0);
+    let swept = 0;
+    for (const k of A){
+      const add = Math.max(0, suf[k] - swept);
+      const spend = Math.floor(add * fraction);
+      if (spend <= 0) continue;
+      next[k] = commitPerDay[k] + spend;
+      swept += spend;                        // book the SCALED amount actually spent
+    }
+    // keep whatever was already committed on days the new pass skipped
+    for (let d = 0; d <= base.nDays; d++) if (!next[d]) next[d] = commitPerDay[d];
+
+    // reservations are rebuilt against THIS pass's vector, so a scaled-back pass
+    // reserves proportionally rather than against a plan it can no longer afford
+    const rv = buildReservations(next, A, goals, ctx, caps);
+    notes = rv.notes;
+    const dist = distribute(next, A, goals, base.start, caps, rv.res, order0);
+    const commits = dist.commits;
+    const trial = simulate({goals:goals, commits:commits, track:trackIds});
+
+    // Learn each goal's real capacity: anything the simulator refused (a debt already
+    // at zero) becomes next pass's ceiling, so the surplus cascades onward instead of
+    // being planned against a balance that no longer exists.
+    for (const g of goals){
+      let planned = 0;
+      for (const list of commits.values())
+        for (const c of list) if (c.goalId === g.id) planned += c.amount_c;
+      const absorbed = trial.funded[g.id] || 0;
+      if (planned > absorbed + 100) caps[g.id] = absorbed;
+    }
+
+    // The floor is a hard constraint, asserted in integer cents on every day.
+    // If this pass overshoots it, don't throw the whole pass away — back the
+    // INCREMENT off geometrically until it fits. Rejecting outright would strand
+    // real capacity just because the last step was a few cents too eager.
+    const baseLow = Math.min(0, base.lowMargin);
+    const holds = (sim) => sim.lowMargin >= baseLow - 1;
+
+    let accepted = trial, accScale = 1;
+    if (!holds(trial)){
+      accepted = null;
+      for (const scale of [0.75, 0.5, 0.25, 0.1]){
+        const scaled = next.map((v, i) => commitPerDay[i] + Math.floor((v - commitPerDay[i]) * scale));
+        const rv2 = buildReservations(scaled, A, goals, ctx, caps);
+        const t2 = simulate({goals:goals, track:trackIds,
+          commits: distribute(scaled, A, goals, base.start, caps, rv2.res, order0).commits});
+        if (holds(t2)){ accepted = t2; accScale = scale; next.splice(0, next.length, ...scaled); break; }
+      }
+      if (!accepted){ converged = false; break; }   // nothing fits: keep the last safe plan
+    }
+
+    const absorbed = absorbedPerDay(accepted, base.nDays);
+    const gain = absorbed.reduce((x, y) => x + y, 0) - commitPerDay.reduce((x, y) => x + y, 0);
+    commitPerDay = absorbed;
+    last = accepted;
+    best = accepted;
+    if (gain < 100) break;                   // under a dollar of extra capacity: done
+  }
+
+  const finalSim = best || base;
+  return {sim:finalSim, base:base, goals:goals, plan:planFromSim(finalSim, goals), A:A,
+          iterations:iterations, converged:converged, notes:notes,
+          infeasible:infeasibleGoals(goals, finalSim, notes)};
+}
+
+/**
+ * Spread each day's committed amount across the open goals, in priority order.
+ * `caps` carries what the previous pass learned each goal could actually absorb —
+ * a debt is also being retired by its minimums, so planning against the original
+ * balance overshoots and strands money that a later goal could have used.
+ */
+function distribute(perDay, A, goals, start, caps, reservations, order0){
+  const commits = new Map();
+  const plan = [];
+  const funded = {};
+  const ceiling = {};
+  const byId = {};
+  for (const g of goals){
+    funded[g.id] = g.funded_c;
+    byId[g.id] = g;
+    const cap = caps && caps[g.id] != null ? g.funded_c + caps[g.id] : Infinity;
+    ceiling[g.id] = Math.min(g.target_c, cap);
+  }
+  const O = order0 || {};
+
+  for (const k of A){
+    let pot = perDay[k] || 0;
+    if (pot <= 0) continue;
+    const date = addDays(start, k);
+
+    const open = goals.filter(g => funded[g.id] < ceiling[g.id]);
+    if (!open.length) break;
+
+    const row0 = {d:k, date:date, total:pot, items:[]};
+    // --- deadline reservations are honoured first, within this day's pot ---
+    const rs = reservations && reservations.get(k);
+    if (rs) for (const r of rs){
+      if (pot <= 0) break;
+      const g = byId[r.goalId];
+      if (!g) continue;
+      const need = ceiling[g.id] - funded[g.id];
+      if (need <= 0) continue;
+      const give = Math.min(r.amount_c, need, pot);
+      if (give <= 0) continue;
+      pot -= give;
+      funded[g.id] += give;
+      if (!commits.has(k)) commits.set(k, []);
+      commits.get(k).push({goalId:g.id, accountId:g.accountId, amount_c:give});
+      row0.items.push({goalId:g.id, name:g.name, amount_c:give,
+                       after:funded[g.id], target:g.target_c, reserved:true});
+    }
+    if (pot <= 0){ if (row0.items.length) plan.push(row0); continue; }
+
+    // The locked buffer is filled before anything else, but only up to what it still
+    // needs — whatever is left on that payday cascades on rather than sitting idle.
+    const buffer = open.find(g => g.exclusive);
+    const rest = open.filter(g => !g.exclusive).sort((a, b) =>
+      (a.priority - b.priority) ||
+      (marginalValue(b) - marginalValue(a)) ||
+      ((ceiling[a.id] - funded[a.id]) - (ceiling[b.id] - funded[b.id])) ||
+      ((O[a.id] == null ? 0 : O[a.id]) - (O[b.id] == null ? 0 : O[b.id])));
+    const order = buffer ? [buffer].concat(rest) : rest;
+
+    const row = row0;
+    for (const g of order){
+      if (pot <= 0) break;
+      const need = ceiling[g.id] - funded[g.id];
+      if (need <= 0) continue;
+      const give = Math.min(pot, need);
+      pot -= give;
+      funded[g.id] += give;
+      if (!commits.has(k)) commits.set(k, []);
+      commits.get(k).push({goalId:g.id, accountId:g.accountId, amount_c:give});
+      row.items.push({goalId:g.id, name:g.name, amount_c:give, after:funded[g.id], target:g.target_c});
+    }
+    row.unspent = pot;
+    if (row.items.length && plan[plan.length - 1] !== row) plan.push(row);
+  }
+  return {commits:commits, plan:plan};
+}
+
+/**
+ * The receipt is rebuilt from what the simulator ACTUALLY applied, not from what the
+ * planner proposed. The two differ wherever a debt reached zero mid-plan, and showing
+ * the proposal would tell you to make a payment that never happens.
+ */
+function planFromSim(sim, goals){
+  const byDay = new Map();
+  const running = {};
+  for (const g of goals) running[g.id] = g.funded_c;
+  const all = [];
+  for (const g of goals)
+    for (const a of (sim.applied[g.id] || [])) all.push({g:g, a:a});
+  all.sort((x, y) => x.a.d - y.a.d);
+  for (const {g, a} of all){
+    if (!byDay.has(a.d)) byDay.set(a.d, {d:a.d, date:a.date, total:0, items:[], unspent:0});
+    const row = byDay.get(a.d);
+    running[g.id] += a.amount_c;
+    row.total += a.amount_c;
+    row.items.push({goalId:g.id, name:g.name, amount_c:a.amount_c,
+                    after:running[g.id], target:g.target_c});
+  }
+  return Array.from(byDay.values()).sort((x, y) => x.d - y.d);
+}
+
+/**
+ * What each day's commitment ACTUALLY cost, read back from the simulation.
+ * The planner proposes; the simulator refuses anything that would pay a debt past
+ * zero. Carrying the proposal forward instead of the outcome would let the next
+ * pass treat the refused money as spare cash and spend it a second time.
+ */
+function absorbedPerDay(sim, nDays){
+  const arr = new Array(nDays + 1).fill(0);
+  for (const gid of Object.keys(sim.applied || {}))
+    for (const a of sim.applied[gid]) arr[a.d] += a.amount_c;
+  return arr;
+}
+
+/**
+ * Feasibility as a first-class result (M7). A goal that misses returns WHY, the
+ * earliest date it could be met, what is holding the capacity, and the levers that
+ * would close the gap — replacing the old behaviour of silently not happening.
+ * Severity: 'met' | 'late' | 'short' | 'impossible'.
+ */
+function infeasibleGoals(goals, sim, notes){
+  const out = [];
+  const N = notes || {};
+  for (const g of goals){
+    const hit = sim.achieved[g.id];
+    const got = goalProgress(g, sim);
+    const gap = Math.max(0, g.target_c - got);
+    const wanted = g.targetDate || null;
+    const late = !!(hit && wanted && hit.date > wanted);
+
+    if (hit && !late) continue;                       // met, and on time if it had a date
+
+    const rec = {
+      id: g.id, name: g.name, target_c: g.target_c, reached_c: got, shortfall_c: gap,
+      targetDate: wanted, projectedDate: hit ? hit.date : null,
+      daysLate: late ? diffDays(wanted, hit.date) : 0,
+      severity: late ? "late" : (gap >= g.target_c - g.funded_c ? "impossible" : "short"),
+      blockedBy: null, reason: (N[g.id] && N[g.id].reason) || null,
+      perPayday_c: (N[g.id] && N[g.id].reservedPerPayday_c) || 0,
+      fixes: []
+    };
+
+    // Who is actually taking the money before this goal? Read it off the realised plan.
+    const ahead = goals.filter(x => x.id !== g.id && !x.exclusive &&
+      (x.priority < g.priority) && (sim.funded[x.id] || 0) > 0)
+      .sort((a, b) => a.priority - b.priority)[0];
+    if (ahead) rec.blockedBy = {id: ahead.id, name: ahead.name, priority: ahead.priority};
+
+    if (late) rec.fixes.push({kind:"delayTo", label:"Move the date to " + longDate(hit.date), date: hit.date});
+    if (gap > 0 && got > g.funded_c)
+      rec.fixes.push({kind:"reduceTargetTo", label:"Reduce the target to " + money0(got), amount_c: got});
+    if (ahead)
+      rec.fixes.push({kind:"raisePriority", label:"Rank this above " + ahead.name,
+                      priority: Math.max(1, ahead.priority - 1)});
+    if (wanted)
+      rec.fixes.push({kind:"clearDate", label:"Drop the date and treat it as ASAP"});
+    out.push(rec);
+  }
+  return out;
+}
+
+/* ---------- the chart: hand-rolled SVG, no library ---------- */
+
+function esc(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function niceStep(range, targetTicks){
+  const raw = range / Math.max(1, targetTicks);
+  const mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, raw))));
+  for (const m of [1, 2, 2.5, 5, 10]) if (raw <= mag * m) return mag * m;
+  return mag * 10;
+}
+
+function chartSVG(sim){
+  const W = 960, H = 400, ml = 74, mr = 122, mt = 20, mb = 34;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const n = sim.nDays;
+
+  const SERIES = [
+    {key:"net",  label:"Net worth",   color:"var(--c-net)",  width:2.4, fill:null},
+    {key:"cash", label:"Cash",        color:"var(--c-cash)", width:1.5, fill:null},
+    {key:"liab", label:"Liabilities", color:"var(--c-liab)", width:1.5, fill:"var(--c-liab-f)"},
+    {key:"inv",  label:"Investments", color:"var(--c-inv)",  width:1.4, fill:"var(--c-inv-f)"},
+    {key:"save", label:"Savings",     color:"var(--c-save)", width:1.4, fill:"var(--c-save-f)"}
+  ].filter(s => sim[s.key].some(v => v !== 0));
+
+  let lo = 0, hi = 0;
+  for (const s of SERIES) for (const v of sim[s.key]){ if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (sim.floorSeries) for (const v of sim.floorSeries){ if (v > hi) hi = v; if (v < lo) lo = v; }
+  else if (sim.floor_c > hi) hi = sim.floor_c;
+  if (hi === lo){ hi = lo + 10000; }
+  const pad = (hi - lo) * 0.08;
+  lo -= pad; hi += pad;
+
+  const x = d => ml + (n ? (d / n) * iw : 0);
+  const y = v => mt + ih - ((v - lo) / (hi - lo)) * ih;
+
+  const path = arr => {
+    let out = "";
+    // stride so a 40-year horizon doesn't emit 14,000 points
+    const stride = Math.max(1, Math.floor(arr.length / 900));
+    for (let i = 0; i < arr.length; i += stride) out += (i ? "L" : "M") + x(i).toFixed(1) + " " + y(arr[i]).toFixed(1);
+    const last = arr.length - 1;
+    if ((last % stride) !== 0) out += "L" + x(last).toFixed(1) + " " + y(arr[last]).toFixed(1);
+    return out;
+  };
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="chart" role="img" ' +
+            'aria-label="Projected net worth, cash and liabilities over ' + Math.round(n/365) + ' years">';
+
+  // --- y grid + labels ---
+  const step = niceStep(hi - lo, 6);
+  const first = Math.ceil(lo / step) * step;
+  for (let v = first; v <= hi; v += step){
+    const yy = y(v).toFixed(1);
+    const isZero = Math.abs(v) < step / 1000;
+    svg += '<line x1="' + ml + '" y1="' + yy + '" x2="' + (ml + iw) + '" y2="' + yy +
+           '" class="grid' + (isZero ? " zero" : "") + '"/>';
+    svg += '<text x="' + (ml - 9) + '" y="' + yy + '" class="ylab" text-anchor="end" dominant-baseline="middle">' +
+           esc(money0(v)) + '</text>';
+  }
+
+  // --- x year ticks ---
+  const sy = ymd(sim.start);
+  for (let yr = sy.y + (sy.m === 1 && sy.d === 1 ? 0 : 1); ; yr++){
+    const d = diffDays(sim.start, isoOf(yr, 1, 1));
+    if (d > n) break;
+    if (d < 0) continue;
+    svg += '<line x1="' + x(d).toFixed(1) + '" y1="' + mt + '" x2="' + x(d).toFixed(1) + '" y2="' + (mt + ih) + '" class="grid"/>';
+    svg += '<text x="' + x(d).toFixed(1) + '" y="' + (mt + ih + 18) + '" class="xlab" text-anchor="middle">' + yr + '</text>';
+  }
+
+  // --- areas then lines ---
+  for (const s of SERIES){
+    if (!s.fill) continue;
+    const base = y(0).toFixed(1);
+    svg += '<path d="' + path(sim[s.key]) + 'L' + x(n).toFixed(1) + ' ' + base + 'L' + ml + ' ' + base + 'Z" fill="' + s.fill + '" stroke="none"/>';
+  }
+  // --- the floor, drawn as a STEP because sinking funds make it move ---
+  const fs = sim.floorSeries && sim.floorSeries.length ? sim.floorSeries : null;
+  if (fs){
+    const fstride = Math.max(1, Math.floor(fs.length / 900));
+    let fp = "";
+    for (let i = 0; i < fs.length; i += fstride){
+      const xx = x(i).toFixed(1), yy = y(fs[i]).toFixed(1);
+      fp += i ? ("L" + xx + " " + yy) : ("M" + xx + " " + yy);
+    }
+    fp += "L" + x(n).toFixed(1) + " " + y(fs[fs.length - 1]).toFixed(1);
+    svg += '<path d="' + fp + '" class="floorline" fill="none"/>';
+  } else {
+    svg += '<line x1="' + ml + '" y1="' + y(sim.floor_c).toFixed(1) + '" x2="' + (ml + iw) +
+           '" y2="' + y(sim.floor_c).toFixed(1) + '" class="floorline"/>';
+  }
+  const ear = (sim.envelopes || []).reduce((t, e) => t + Math.max(0, e.start_c), 0);
+  const parts = [];
+  if (sim.guard_c) parts.push("guard " + money0(sim.guard_c));
+  if (sim.held_c)  parts.push("buffer " + money0(sim.held_c));
+  if (ear)         parts.push("sinking funds " + money0(ear));
+  svg += '<text x="' + (ml + 6) + '" y="' + (y(sim.floor_c) - 6).toFixed(1) + '" class="floorlab">Floor ' +
+         esc(money0(sim.floor_c)) + (parts.length ? ' · ' + esc(parts.join(" + ")) : '') + '</text>';
+
+  for (const s of SERIES){
+    svg += '<path d="' + path(sim[s.key]) + '" fill="none" stroke="' + s.color + '" stroke-width="' + s.width +
+           '" stroke-linejoin="round" stroke-linecap="round"/>';
+  }
+
+  // --- today ---
+  svg += '<line x1="' + ml + '" y1="' + mt + '" x2="' + ml + '" y2="' + (mt + ih) + '" class="todayline"/>';
+  svg += '<text x="' + (ml + 5) + '" y="' + (mt + 11) + '" class="todaylab">Today</text>';
+
+  // --- end-of-horizon value labels, collision-avoided ---
+  const ends = SERIES.map(s => ({label:s.label, color:s.color, v:sim[s.key][n], y:y(sim[s.key][n])}))
+                     .sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i-1].y < 15) ends[i].y = ends[i-1].y + 15;
+  for (const e of ends){
+    svg += '<text x="' + (ml + iw + 8) + '" y="' + e.y.toFixed(1) + '" class="endlab" fill="' + e.color +
+           '" dominant-baseline="middle">' + esc(e.label) + '</text>';
+    svg += '<text x="' + (ml + iw + 8) + '" y="' + (e.y + 12).toFixed(1) + '" class="endval" fill="' + e.color +
+           '" dominant-baseline="middle">' + esc(money0(e.v)) + '</text>';
+  }
+
+  // --- the low point of cash, WITH ITS DATE ---
+  const lx = x(sim.low.d), ly = y(sim.low.v);
+  svg += '<circle cx="' + lx.toFixed(1) + '" cy="' + ly.toFixed(1) + '" r="4" class="lowdot"/>';
+  const lowRight = lx < ml + iw * 0.6;
+  svg += '<text x="' + (lowRight ? lx + 10 : lx - 10).toFixed(1) + '" y="' + (ly + 18).toFixed(1) +
+         '" class="callout" text-anchor="' + (lowRight ? "start" : "end") + '">Tightest day: ' +
+         esc(shortDate(sim.low.date)) + ' · ' + esc(money0(sim.low.v)) + '</text>';
+
+  // --- milestones: a numbered diamond on the curve, named in the legend beside it ---
+  const flags = (sim.events || []).slice(0, 12);
+  flags.forEach((ev, i) => {
+    const ex = x(ev.d), ey = y(sim.net[ev.d]);
+    const r = 6.5;
+    svg += '<line x1="' + ex.toFixed(1) + '" y1="' + (mt + ih).toFixed(1) +
+           '" x2="' + ex.toFixed(1) + '" y2="' + ey.toFixed(1) + '" class="flagline"/>';
+    svg += '<path d="M' + ex.toFixed(1) + ' ' + (ey - r).toFixed(1) +
+           'L' + (ex + r).toFixed(1) + ' ' + ey.toFixed(1) +
+           'L' + ex.toFixed(1) + ' ' + (ey + r).toFixed(1) +
+           'L' + (ex - r).toFixed(1) + ' ' + ey.toFixed(1) + 'Z" class="mstone"/>';
+    svg += '<text x="' + ex.toFixed(1) + '" y="' + (ey + 0.5).toFixed(1) +
+           '" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text>';
+  });
+
+  svg += '</svg>';
+  return svg;
+}
+
+/* ============================================================
+   3e. IMPORT (M8) — OFX/QFX and CSV, parsed in the page, no libraries
+   ============================================================ */
+
+/** RFC4180-ish: quoted fields may contain the delimiter, newlines and "" escapes. */
+function parseCSV(text, delim){
+  const D = delim || ",";
+  const rows = [];
+  let row = [], field = "", q = false, i = 0;
+  const s = text.replace(/^﻿/, "");
+  while (i < s.length){
+    const c = s[i];
+    if (q){
+      if (c === '"'){
+        if (s[i+1] === '"'){ field += '"'; i += 2; continue; }
+        q = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"'){ q = true; i++; continue; }
+    if (c === D){ row.push(field); field = ""; i++; continue; }
+    if (c === "\r"){ i++; continue; }
+    if (c === "\n"){ row.push(field); rows.push(row); row = []; field = ""; i++; continue; }
+    field += c; i++;
+  }
+  if (field.length || row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(x => String(x).trim() !== ""));
+}
+
+function sniffDelimiter(text){
+  const head = text.slice(0, 4000).split(/\r?\n/).slice(0, 8).join("\n");
+  let best = ",", bestN = -1;
+  for (const d of [",", "\t", ";", "|"]){
+    const rows = parseCSV(head, d);
+    if (rows.length < 2) continue;
+    const n = rows[0].length;
+    if (n < 2) continue;
+    const consistent = rows.filter(r => r.length === n).length / rows.length;
+    const score = n * consistent;
+    if (score > bestN){ bestN = score; best = d; }
+  }
+  return best;
+}
+
+const MONEY_RE = /^\s*[-+(]?\s*\$?\s*[\d,]*\.?\d+\s*\)?-?\s*$/;
+function looksMoney(v){ return v !== "" && MONEY_RE.test(String(v)); }
+
+/** Decide a date format from a whole column, not one row. */
+function detectDateFormat(vals){
+  let iso = 0, dmy = 0, mdy = 0, ok = 0;
+  for (const v of vals){
+    const s = String(v).trim();
+    if (/^\d{4}-\d{1,2}-\d{1,2}/.test(s)){ iso++; ok++; continue; }
+    const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+    if (!m) continue;
+    ok++;
+    const a = +m[1], b = +m[2];
+    if (a > 12) dmy++;
+    else if (b > 12) mdy++;
+  }
+  if (!ok) return null;
+  if (iso >= ok * 0.6) return "iso";
+  return dmy > mdy ? "dmy" : "mdy";           // US exports dominate; ties go to MM/DD
+}
+
+function parseDateCell(v, fmt){
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return isoOf(+m[1], +m[2], +m[3]);
+  m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (!m) return null;
+  let a = +m[1], b = +m[2], y = +m[3];
+  if (y < 100) y += y < 70 ? 2000 : 1900;
+  let mo, dy;
+  if (fmt === "dmy"){ dy = a; mo = b; } else { mo = a; dy = b; }
+  if (mo < 1 || mo > 12 || dy < 1 || dy > 31) return null;
+  return isoOf(y, mo, dy);
+}
+
+const HEADER_HINTS = {
+  date:   ["transaction date", "post date", "posted date", "date", "trans date", "posting date"],
+  payee:  ["description", "payee", "merchant", "name", "memo", "details", "original description",
+           "transaction description"],
+  amount: ["amount", "transaction amount", "amt"],
+  debit:  ["debit", "withdrawal", "withdrawals", "money out", "charges"],
+  credit: ["credit", "deposit", "deposits", "money in", "payments"],
+  balance:["balance", "running balance", "ending balance"],
+  category:["category", "type"]
+};
+const normHeader = (h) => String(h || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+
+/** Score each column against the role hints, then confirm with the data itself. */
+function inferRoles(headers, rows){
+  const map = {};
+  const taken = {};
+  const hs = headers.map(normHeader);
+  for (const role of ["date", "amount", "debit", "credit", "balance", "payee", "category"]){
+    let best = -1, bestScore = 0;
+    for (let i = 0; i < hs.length; i++){
+      if (taken[i]) continue;
+      let sc = 0;
+      for (const hint of HEADER_HINTS[role]){
+        if (hs[i] === hint) sc = Math.max(sc, 3);
+        else if (hs[i].indexOf(hint) >= 0) sc = Math.max(sc, 2);
+      }
+      if (!sc) continue;
+      if (sc > bestScore){ bestScore = sc; best = i; }
+    }
+    if (best >= 0){ map[role] = best; taken[best] = 1; }
+  }
+  // fall back to the data when headers are unhelpful
+  const col = (i) => rows.map(r => r[i]).filter(v => v != null && String(v).trim() !== "");
+  if (map.date == null){
+    for (let i = 0; i < headers.length; i++){
+      if (taken[i]) continue;
+      if (detectDateFormat(col(i).slice(0, 25))){ map.date = i; taken[i] = 1; break; }
+    }
+  }
+  if (map.amount == null && map.debit == null && map.credit == null){
+    for (let i = headers.length - 1; i >= 0; i--){
+      if (taken[i]) continue;
+      const c = col(i).slice(0, 25);
+      if (c.length && c.every(looksMoney)){ map.amount = i; taken[i] = 1; break; }
+    }
+  }
+  if (map.payee == null){
+    let best = -1, bestLen = 0;
+    for (let i = 0; i < headers.length; i++){
+      if (taken[i]) continue;
+      const c = col(i).slice(0, 25);
+      const avg = c.reduce((s, v) => s + String(v).length, 0) / Math.max(1, c.length);
+      if (avg > bestLen){ bestLen = avg; best = i; }
+    }
+    if (best >= 0) map.payee = best;
+  }
+  return map;
+}
+
+function rowsToCandidates(rows, map, fmt, accountId){
+  const out = [];
+  for (const r of rows){
+    const date = parseDateCell(r[map.date], fmt);
+    if (!date) continue;
+    let cents = 0;
+    if (map.amount != null) cents = toCents(r[map.amount]);
+    else {
+      const dr = map.debit  != null ? Math.abs(toCents(r[map.debit]))  : 0;
+      const cr = map.credit != null ? Math.abs(toCents(r[map.credit])) : 0;
+      cents = cr - dr;
+    }
+    if (!cents) continue;
+    out.push({
+      date: date,
+      payee: String(map.payee != null ? (r[map.payee] || "") : "").trim().slice(0, 120),
+      amount_c: cents,
+      fitid: null,
+      accountId: accountId,
+      memo: map.category != null ? String(r[map.category] || "").trim() : ""
+    });
+  }
+  return out;
+}
+
+/* ---- OFX / QFX ---- */
+
+const OFX_AGGREGATES = {
+  OFX:1, SIGNONMSGSRSV1:1, SONRS:1, BANKMSGSRSV1:1, CREDITCARDMSGSRSV1:1, STMTTRNRS:1,
+  CCSTMTTRNRS:1, STMTRS:1, CCSTMTRS:1, BANKTRANLIST:1, STMTTRN:1, BANKACCTFROM:1,
+  CCACCTFROM:1, LEDGERBAL:1, AVAILBAL:1, STATUS:1, FI:1
+};
+
+/**
+ * OFX 1.x is SGML with UNCLOSED leaf tags; OFX 2.x is real XML. One tokenizer handles
+ * both: a tag that is a known aggregate opens a level, anything else is a leaf whose
+ * value runs to the next '<'. An explicit </LEAF> is legal in 1.x and simply ignored.
+ */
+function parseOFX(text){
+  const body = text.slice(Math.max(0, text.search(/<OFX>/i)));
+  if (body.indexOf("<") < 0) return {statements: []};
+  const stack = [];
+  const root = {tag:"ROOT", children:[], values:{}};
+  stack.push(root);
+  const re = /<(\/?)([A-Za-z0-9._]+)>([^<]*)/g;
+  let m;
+  while ((m = re.exec(body))){
+    const closing = m[1] === "/";
+    const tag = m[2].toUpperCase();
+    const val = (m[3] || "").trim();
+    const top = stack[stack.length - 1];
+    if (closing){
+      if (OFX_AGGREGATES[tag]){
+        for (let i = stack.length - 1; i > 0; i--){
+          if (stack[i].tag === tag){ stack.length = i; break; }
+        }
+      }
+      continue;                                   // </LEAF> in SGML: nothing to do
+    }
+    if (OFX_AGGREGATES[tag]){
+      const node = {tag:tag, children:[], values:{}};
+      top.children.push(node);
+      stack.push(node);
+      if (val) node.values._text = val;
+    } else if (val !== ""){
+      top.values[tag] = val;
+    } else {
+      top.values[tag] = "";
+    }
+  }
+  const statements = [];
+  const walk = (node, acct) => {
+    let a = acct;
+    if (node.tag === "BANKACCTFROM" || node.tag === "CCACCTFROM"){
+      a = {acctid: node.values.ACCTID || "", bankid: node.values.BANKID || "",
+           kind: node.tag === "CCACCTFROM" ? "credit" : "bank"};
+    }
+    if (node.tag === "STMTTRN"){
+      statements.push({acct: acct, txn: node.values});
+      return;
+    }
+    for (const c of node.children) walk(c, a);
+  };
+  // two passes so an account found later in a statement still labels its transactions
+  const collect = (node, acct) => {
+    let a = acct;
+    for (const c of node.children){
+      if (c.tag === "BANKACCTFROM" || c.tag === "CCACCTFROM"){
+        a = {acctid: c.values.ACCTID || "", bankid: c.values.BANKID || "",
+             kind: c.tag === "CCACCTFROM" ? "credit" : "bank"};
+      }
+    }
+    for (const c of node.children){
+      if (c.tag === "STMTTRN") statements.push({acct:a, v:c.values});
+      else collect(c, a);
+    }
+  };
+  collect(root, null);
+  return {statements: statements};
+}
+
+/** OFX dates are YYYYMMDD with an optional time and [tz] suffix — take the date part only. */
+function ofxDate(v){
+  const s = String(v || "").trim();
+  const m = s.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (!m) return null;
+  return isoOf(+m[1], +m[2], +m[3]);
+}
+
+function ofxCandidates(text, accountId){
+  const {statements} = parseOFX(text);
+  const out = [];
+  for (const st of statements){
+    const v = st.v || {};
+    const date = ofxDate(v.DTPOSTED || v.DTUSER);
+    if (!date) continue;
+    const cents = toCents(v.TRNAMT);
+    if (!cents) continue;
+    const payee = (v.NAME || v.PAYEE || v.MEMO || "").trim();
+    out.push({
+      date: date,
+      payee: payee.slice(0, 120),
+      amount_c: cents,                            // OFX signs outflows negative already
+      fitid: (v.FITID || "").trim() || null,
+      accountId: accountId,
+      memo: (v.MEMO && v.MEMO !== payee ? v.MEMO : "").slice(0, 160),
+      srcAcct: st.acct || null
+    });
+  }
+  return out;
+}
+
+/* ---- occurrence matching (M9) ----
+ * A transaction that IS a planned bill must stop that bill being projected again,
+ * or the same $150 of electricity is counted twice: once as money already gone and
+ * once as money still to go.
+ *
+ * The claim is keyed on {recurrenceId, occDate} — the DATE the occurrence falls on,
+ * never its index. An index key is derived from the anchor, so moving an anchor by a
+ * day would silently suppress a different bill. A date key that no longer matches any
+ * generated occurrence simply goes inert, which is the safe direction to fail.
+ */
+
+/** Planned occurrences in a window, as a flat list for matching against. */
+function plannedOccurrences(fromISO, untilISO){
+  const out = [];
+  for (const r of state.recurrences){
+    if (!r.accountId) continue;
+    for (const o of occurrences(r, {max:400, from:fromISO, until:untilISO})){
+      out.push({recId:r.id, name:r.name, date:o.date, accountId:r.accountId,
+                categoryId:r.categoryId || "", kind:r.kind,
+                amount_c:(r.kind === "income" ? 1 : -1) * amountOn(r, o.date)});
+    }
+  }
+  return out;
+}
+
+/** Every claim currently asserted by a stored transaction. */
+function buildClaims(){
+  const s = new Set();
+  for (const mk of Object.keys(state.txMonths))
+    for (const t of state.txMonths[mk])
+      if (t.satisfies && t.satisfies.recId && t.satisfies.occDate)
+        s.add(t.satisfies.recId + "|" + t.satisfies.occDate);
+  return s;
+}
+
+const MATCH_DAYS = 5;
+/** Within 5 days, same account, same direction, and within the larger of 2% or $2. */
+function matchCandidate(c, planned, taken){
+  let best = null, bestScore = Infinity;
+  for (const p of planned){
+    if (p.accountId !== c.accountId) continue;
+    if ((p.amount_c < 0) !== (c.amount_c < 0)) continue;
+    const key = p.recId + "|" + p.date;
+    if (taken.has(key)) continue;
+    const dd = Math.abs(diffDays(p.date, c.date));
+    if (dd > MATCH_DAYS) continue;
+    const tol = Math.max(200, Math.round(Math.abs(p.amount_c) * 0.02));
+    const diff = Math.abs(Math.abs(c.amount_c) - Math.abs(p.amount_c));
+    if (diff > tol) continue;
+    const score = dd * 1000 + diff;          // nearest date first, then closest amount
+    if (score < bestScore){ bestScore = score; best = p; }
+  }
+  return best;
+}
+
+function attachMatches(cands){
+  if (!cands.length) return cands;
+  const dates = cands.map(c => c.date).sort();
+  const from = addDays(dates[0], -MATCH_DAYS);
+  const until = addDays(dates[dates.length - 1], MATCH_DAYS);
+  const planned = plannedOccurrences(from, until);
+  const taken = buildClaims();
+  for (const c of cands){
+    if (c.bucket === "dupe"){ c.match = null; continue; }
+    const p = matchCandidate(c, planned, taken);
+    if (p){
+      c.match = {recId:p.recId, occDate:p.date, name:p.name, planned_c:p.amount_c};
+      if (!c.categoryId && p.categoryId) c.categoryId = p.categoryId;
+      taken.add(p.recId + "|" + p.date);
+    } else c.match = null;
+  }
+  return cands;
+}
+
+/* ---- dedupe and classification ---- */
+
+const normPayee = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
+function buildImportIndex(){
+  const byFitid = new Set();
+  const byPrint = new Map();                      // key -> [dates]
+  for (const mk of Object.keys(state.txMonths)){
+    for (const t of state.txMonths[mk]){
+      if (t.quick) continue;                      // quick-entry adjustments are not real rows
+      if (t.fitid) byFitid.add(t.fitid);
+      const key = t.accountId + "|" + t.amount_c + "|" + normPayee(t.payee);
+      if (!byPrint.has(key)) byPrint.set(key, []);
+      byPrint.get(key).push(t.date);
+    }
+  }
+  return {byFitid: byFitid, byPrint: byPrint};
+}
+
+/** FITID is bank-issued and exact. Without one, match on amount+payee within 3 days. */
+function classifyImport(cands, index){
+  const seenFitid = new Set();
+  const seenPrint = new Map();
+  const out = [];
+  for (const c of cands){
+    let bucket = "new", why = "";
+    if (c.fitid && (index.byFitid.has(c.fitid) || seenFitid.has(c.fitid))){
+      bucket = "dupe"; why = "same bank transaction id";
+    } else {
+      const key = c.accountId + "|" + c.amount_c + "|" + normPayee(c.payee);
+      const near = (index.byPrint.get(key) || []).concat(seenPrint.get(key) || []);
+      if (near.some(d => Math.abs(diffDays(d, c.date)) <= 3)){
+        bucket = "dupe"; why = "same amount and payee within 3 days";
+      }
+      if (!seenPrint.has(key)) seenPrint.set(key, []);
+      seenPrint.get(key).push(c.date);
+    }
+    if (c.fitid) seenFitid.add(c.fitid);
+    out.push(Object.assign({}, c, {bucket: bucket, why: why,
+      categoryId: predictCategory(c.payee)}));
+  }
+  return out;
+}
+
+/** Categorise from the user's own history — no stored rules table to go stale. */
+function predictCategory(payee){
+  const p = normPayee(payee);
+  if (!p) return "";
+  const votes = {};
+  for (const mk of Object.keys(state.txMonths)){
+    for (const t of state.txMonths[mk]){
+      if (!t.categoryId || t.quick) continue;
+      const q = normPayee(t.payee);
+      if (!q) continue;
+      if (q === p || q.indexOf(p) === 0 || p.indexOf(q) === 0)
+        votes[t.categoryId] = (votes[t.categoryId] || 0) + 1;
+    }
+  }
+  let best = "", n = 0;
+  for (const k of Object.keys(votes)) if (votes[k] > n){ n = votes[k]; best = k; }
+  return best;
+}
+
+/* ============================================================
+   3f. SUPABASE — accounts, and one budget per signed-in person
+   ============================================================ */
+
+/* ---------------------------------------------------------------
+   Fill these in from your Supabase dashboard.
+
+     SUPABASE_URL  Project Settings -> Data API -> Project URL
+                   (older dashboards: Project Settings -> API)
+
+     SUPABASE_KEY  Project Settings -> API Keys -> publishable
+                   starts "sb_publishable_". Supabase used to call this
+                   the "anon public" key; if your project still shows a
+                   Legacy API keys tab, that key (starting "eyJ") works
+                   exactly the same.
+
+   Both belong in public code. The key identifies the project, never a
+   person: it can only ever act as whoever is signed in, and Row Level
+   Security in Postgres is what separates one budget from another.
+   NEVER put the "secret" / "service_role" key here — it bypasses all of it.
+   --------------------------------------------------------------- */
+const SUPABASE_URL = "PASTE_YOUR_PROJECT_URL_HERE";
+const SUPABASE_KEY = "PASTE_YOUR_PUBLISHABLE_KEY_HERE";
+
+const cloudConfigured = () =>
+  /^https:\/\/[^\s]+\.supabase\.(co|in)\/?$/.test(SUPABASE_URL) &&
+  /^(sb_publishable_|eyJ)/.test(SUPABASE_KEY);
+
+let sb = null, sbUser = null;
+
+function sbInit(){
+  if (/^sb_secret_/.test(SUPABASE_KEY) || /service_role/.test(SUPABASE_KEY)){
+    // A secret key in client code would let anyone read every budget.
+    alert("That looks like your SECRET Supabase key. Use the publishable key instead — " +
+          "the secret one bypasses row-level security and must never be published.");
+    return null;
+  }
+  if (sb || !cloudConfigured()) return sb;
+  const lib = window.supabase;
+  if (!lib || !lib.createClient) return null;
+  sb = lib.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    // detectSessionInUrl is what turns the tokens on a confirmation link into a
+    // real session, so following the email lands you signed in rather than back
+    // at the sign-in form.
+    auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: true}
+  });
+  return sb;
+}
+
+/** Where a confirmation or recovery link should come back to: this page. */
+function authRedirectTo(){
+  return location.origin + location.pathname;
+}
+
+/** Supabase reports a dead or expired link in the URL fragment. Show it, don't swallow it. */
+function authLinkMessage(){
+  const raw = (location.hash || "").replace(/^#/, "") || location.search.replace(/^\?/, "");
+  if (!raw) return null;
+  let p;
+  try { p = new URLSearchParams(raw); } catch (e){ return null; }
+  const err = p.get("error_description") || p.get("error");
+  if (err) return err.replace(/\+/g, " ");
+  if (p.get("type") === "signup") return "Email confirmed. Sign in below.";
+  return null;
+}
+
+/** Tokens should not linger in the address bar or the browser history. */
+function clearAuthLink(){
+  if (/access_token|refresh_token|error|type=(signup|recovery|magiclink)/.test(location.hash + location.search)){
+    try { history.replaceState(null, "", location.pathname); } catch (e){}
+  }
+}
+
+/** Every row this user owns. RLS means the query cannot return anyone else's. */
+async function sbLoadAll(){
+  const {data, error} = await sb.from("documents").select("path,data");
+  if (error) throw error;
+  for (const row of (data || [])){
+    const parts = String(row.path).split("/");
+    const coll = parts[0], id = parts[1];
+    const d = row.data || {};
+    if (coll === "core"){
+      if (id === "settings")         state.settings    = d.settings || blankSettings();
+      else if (id === "accounts")    state.accounts    = d.items || [];
+      else if (id === "categories")  state.categories  = d.items || [];
+      else if (id === "recurrences") state.recurrences = d.items || [];
+      else if (id === "goals")       state.goals       = d.items || [];
+      else if (id === "expressions")  state.exprs       = d.exprs || {};
+    } else if (coll === "txns"){
+      state.txMonths[id] = d.items || [];
+    } else if (coll === "budget"){
+      state.budgetMonths[id] = {budgeted: d.budgeted || {}, incomeOverrides: d.incomeOverrides || undefined};
+    }
+  }
+  return (data || []).length;
+}
+
+async function sbWrite(path, body){
+  const {error} = await sb.from("documents")
+    .upsert({user_id: sbUser.id, path: path, data: body}, {onConflict: "user_id,path"});
+  if (error) throw error;
+}
+
+/* ---------- the sign-in gate ---------- */
+
+function authGate(message){
+  const host = document.getElementById("panes");
+  for (const id of ["nav", "strip", "stripnote"]){
+    const n = document.getElementById(id);
+    if (n) n.hidden = true;
+  }
+  host.textContent = "";
+
+  const box = el("div", "authbox");
+  box.appendChild(el("h2", "", "Better Budget"));
+  box.appendChild(el("p", "authsub",
+    "Sign in to reach your budget. Everyone who signs up gets their own — nobody can see anyone else's."));
+
+  const err = el("div", "autherr");
+  err.hidden = !message;
+  if (message){
+    // a confirmed email is good news, not a failure
+    if (/^Email confirmed/i.test(message)) err.className = "autherr ok";
+    err.textContent = message;
+  }
+  box.appendChild(err);
+
+  const field = (label, type, id, auto) => {
+    const f = el("div", "fld");
+    f.appendChild(el("label", "", label));
+    const i = el("input");
+    i.type = type; i.id = id; i.autocomplete = auto;
+    f.appendChild(i);
+    box.appendChild(f);
+    return i;
+  };
+  const email = field("Email", "email", "auth-email", "username");
+  const pass  = field("Password", "password", "auth-pass", "current-password");
+
+  const tools = el("div", "tools");
+  const signIn = el("button", "btn primary", "Sign in");
+  const signUp = el("button", "btn", "Create an account");
+  signIn.type = "button"; signUp.type = "button";
+
+  const busy = (what) => {
+    signIn.disabled = signUp.disabled = true;
+    err.hidden = false; err.className = "autherr busy"; err.textContent = what;
+  };
+  const fail = (e) => {
+    err.hidden = false; err.className = "autherr";
+    err.textContent = (e && e.message) ? e.message : String(e);
+    signIn.disabled = signUp.disabled = false;
+  };
+
+  signIn.addEventListener("click", async () => {
+    busy("Signing in…");
+    try {
+      const {error} = await sb.auth.signInWithPassword({email: email.value.trim(), password: pass.value});
+      if (error) throw error;
+      await boot();
+    } catch (e){ fail(e); }
+  });
+  signUp.addEventListener("click", async () => {
+    busy("Creating your account…");
+    try {
+      const {error} = await sb.auth.signUp({
+        email: email.value.trim(),
+        password: pass.value,
+        options: {emailRedirectTo: authRedirectTo()}     // come back here, not to the default site
+      });
+      if (error) throw error;
+      err.className = "autherr ok";
+      err.textContent = "Check your email and follow the confirmation link — it brings you straight back here.";
+      signIn.disabled = signUp.disabled = false;
+    } catch (e){ fail(e); }
+  });
+  tools.appendChild(signIn); tools.appendChild(signUp);
+  box.appendChild(tools);
+  pass.addEventListener("keydown", (e) => { if (e.key === "Enter") signIn.click(); });
+
+  box.appendChild(el("p", "authfoot",
+    "Your budget lives in your own account and is not shared. Passwords are reset from the Supabase dashboard."));
+
+  // If sign-in is unreachable — the project is paused, offline, out of quota — the
+  // last saved copy is still in this browser. Never make someone get past a login
+  // they cannot pass in order to rescue their own data.
+  let mirrored = null;
+  try { mirrored = localStorage.getItem(LS_KEY); } catch (e){ mirrored = null; }
+  if (mirrored && mirrored.length > 200){
+    const rescue = el("div", "authrescue");
+    let when = "";
+    try {
+      const d = JSON.parse(mirrored);
+      if (d && d.exportedAt) when = " from " + shortDate(String(d.exportedAt).slice(0, 10));
+    } catch (e){ /* a timestamp is a nicety, not a requirement */ }
+    rescue.appendChild(el("p", "authsub",
+      "This browser still holds your last saved budget" + when +
+      ". You can take a copy without signing in."));
+    const b2 = el("button", "btn sm", "Download that backup");
+    b2.type = "button";
+    b2.addEventListener("click", () => {
+      const blob = new Blob([mirrored], {type: "application/json"});
+      const a2 = el("a");
+      a2.href = URL.createObjectURL(blob);
+      a2.download = "better-budget-backup-" + todayISO() + ".json";
+      document.body.appendChild(a2); a2.click();
+      setTimeout(() => { URL.revokeObjectURL(a2.href); document.body.removeChild(a2); }, 0);
+    });
+    rescue.appendChild(b2);
+    box.appendChild(rescue);
+  }
+  host.appendChild(box);
+}
+
+async function signOut(){
+  try { await sb.auth.signOut(); } catch (e){}
+  location.reload();
+}
+
+/* ============================================================
+   4. PERSISTENCE — artifact db, with a localStorage fallback
+   ============================================================ */
+
+const store = {
+  db: null,
+  mode: "loading",       // "db" | "local" | "memory"
+  queue: new Map(),      // path -> pending body; latest body per path wins
+  draining: false,
+  dirty: false,
+  cloudError: null       // set when the cloud was configured but unreachable
+};
+
+const LS_KEY = "better-budget-v1";
+
+function setSave(kind, text){
+  const dot = document.getElementById("saveDot");
+  const txt = document.getElementById("saveTxt");
+  if (!dot || !txt) return;
+  dot.className = "dot" + (kind ? " " + kind : "");
+  txt.textContent = text;
+}
+
+/** Coalesce writes: one in flight per path, latest body wins. */
+function queueWrite(path, body){
+  if (store.mode === "memory"){ saveLocalMirror(); return; }
+  store.queue.set(path, body);
+  store.dirty = true;
+  setSave("busy", "saving…");
+  flushWrites();
+}
+
+/**
+ * Single drain loop: one write in flight at a time, latest body per path wins.
+ * Writes queued mid-drain are picked up by the same loop, so this never spins.
+ */
+async function flushWrites(){
+  if (store.draining) return;
+  store.draining = true;
+  let failed = false;
+  try {
+    while (store.queue.size){
+      const [path, body] = store.queue.entries().next().value;
+      store.queue.delete(path);
+      if (store.mode === "supabase"){
+        try { await sbWrite(path, body); }
+        catch (e){ reportWriteFailure(e); failed = true; }
+        continue;
+      }
+      if (store.mode !== "db" || !store.db){ saveLocalMirror(); continue; }
+      try {
+        await store.db.doc(path).set(body);
+      } catch (e){
+        const code = e && e.code ? e.code : "unavailable";
+        if (code === "unavailable"){
+          await new Promise(r => setTimeout(r, 400 + Math.random() * 600));
+          try { await store.db.doc(path).set(body); }
+          catch (e2){ reportWriteFailure(e2); failed = true; }
+        } else {
+          reportWriteFailure(e); failed = true;
+        }
+      }
+    }
+  } finally {
+    store.draining = false;
+  }
+  store.dirty = false;
+  if (!failed) setSave("ok", store.mode === "db" ? "saved" : "saved locally");
+}
+
+function reportWriteFailure(e){
+  const code = e && e.code ? e.code : "unknown";
+  if (code === "quota_exceeded"){
+    setSave("err", "storage full — export a backup");
+  } else if (code === "invalid_argument"){
+    setSave("err", "read-only — export a backup");
+  } else if (code === "revoked"){
+    setSave("err", "access ended — export a backup");
+  } else {
+    setSave("err", "save failed — export a backup");
+  }
+  saveLocalMirror();
+}
+
+/**
+ * Read the local mirror back, if it holds anything worth having.
+ * Returns false for a missing, corrupt or empty mirror, so a caller can tell
+ * "nothing here" from "something was recovered".
+ */
+function restoreFromLocalMirror(){
+  let raw = null;
+  try { raw = localStorage.getItem(LS_KEY); } catch (e){ return false; }
+  if (!raw) return false;
+  let p = null;
+  try { p = JSON.parse(raw); } catch (e){ return false; }
+  if (!p || p.app !== "better-budget") return false;
+  const substantial = (p.accounts && p.accounts.length) ||
+                      (p.recurrences && p.recurrences.length) ||
+                      (p.goals && p.goals.length) ||
+                      (p.transactions && Object.keys(p.transactions).length) ||
+                      (p.budgetMonths && Object.keys(p.budgetMonths).length);
+  if (!substantial) return false;
+  try { applyPayload(p); } catch (e){ return false; }
+  return true;
+}
+
+/** A local mirror always runs, so a db hiccup never loses the session's work. */
+function saveLocalMirror(){
+  try { localStorage.setItem(LS_KEY, JSON.stringify(exportPayload())); }
+  catch (e){ /* private window / blocked storage — the export button is the answer */ }
+}
+
+function docPaths(){
+  return {
+    settings:    "core/settings",
+    accounts:    "core/accounts",
+    categories:  "core/categories",
+    recurrences: "core/recurrences",
+    goals:       "core/goals",
+    exprs:       "core/expressions"
+  };
+}
+
+function persistCore(which){
+  const p = docPaths();
+  const map = {
+    settings:    () => ({v: SCHEMA_VERSION, settings: state.settings}),
+    accounts:    () => ({v: SCHEMA_VERSION, items: state.accounts}),
+    categories:  () => ({v: SCHEMA_VERSION, items: state.categories}),
+    recurrences: () => ({v: SCHEMA_VERSION, items: state.recurrences}),
+    goals:       () => ({v: SCHEMA_VERSION, items: state.goals}),
+    exprs:       () => ({v: SCHEMA_VERSION, exprs: state.exprs || {}})
+  };
+  if (which) queueWrite(p[which], map[which]());
+  else for (const k of Object.keys(map)) queueWrite(p[k], map[k]());
+  saveLocalMirror();
+}
+
+function persistMonth(key){
+  queueWrite("txns/" + key, {v: SCHEMA_VERSION, items: state.txMonths[key] || []});
+  saveLocalMirror();
+}
+
+function persistBudget(key){
+  const m = state.budgetMonths[key] || {};
+  const doc = {v: SCHEMA_VERSION, budgeted: m.budgeted || {}};
+  if (m.incomeOverrides && Object.keys(m.incomeOverrides).length) doc.incomeOverrides = m.incomeOverrides;
+  queueWrite("budget/" + key, doc);
+  saveLocalMirror();
+}
+
+async function loadAll(){
+  // 0. Supabase, when configured: only the signed-in user's own rows
+  if (cloudConfigured() && sbInit()){
+    const sess = await sb.auth.getSession();
+    const session = sess && sess.data ? sess.data.session : null;
+    if (!session){ store.mode = "anon"; return; }
+    sbUser = session.user;
+    store.mode = "supabase";
+
+    // A read can fail for reasons that have nothing to do with this budget: the
+    // project paused, the quota spent, the network gone. Letting that throw left
+    // boot() unfinished and the page stuck on "loading…", with no way to reach the
+    // export — the one moment the local copy matters most is the one it was
+    // unreachable in. Fall back to this browser's copy and say so.
+    let n = 0;
+    try {
+      n = await sbLoadAll();
+    } catch (e){
+      store.mode = "local";
+      store.cloudError = (e && e.message) ? e.message : "could not be reached";
+      const have = restoreFromLocalMirror();
+      setSave(have ? "warn" : "err",
+              have ? "offline — using this browser's copy" : "offline — nothing stored here");
+      return;
+    }
+
+    if (!n){
+      // Zero rows is ambiguous: a genuinely new account, or an account whose rows
+      // could not be read — a paused project, a spend cap, a policy change. Seeding
+      // blank would be written straight back over the local mirror, destroying the
+      // only remaining copy. So an existing mirror wins, and is re-uploaded.
+      const rescued = restoreFromLocalMirror();
+      if (rescued){
+        persistCore();
+        for (const k of Object.keys(state.txMonths)) persistMonth(k);
+        for (const k of Object.keys(state.budgetMonths)) persistBudget(k);
+        setSave("ok", "restored from this browser");
+        return;
+      }
+      await seedFirstRun();
+    }
+    setSave("ok", "saved to your account");
+    return;
+  }
+
+  // 1. try the artifact database
+  let db = null;
+  try { db = await window.claude?.use?.("db"); } catch (e){ db = null; }
+
+  if (db){
+    store.db = db; store.mode = "db";
+    const p = docPaths();
+    try {
+      const [s, a, c, r, g] = await Promise.all([
+        db.doc(p.settings).get(), db.doc(p.accounts).get(), db.doc(p.categories).get(),
+        db.doc(p.recurrences).get(), db.doc(p.goals).get()
+      ]);
+      if (s.exists) state.settings = s.data().settings || blankSettings();
+      if (a.exists) state.accounts = a.data().items || [];
+      if (c.exists) state.categories = c.data().items || [];
+      if (r.exists) state.recurrences = r.data().items || [];
+      if (g.exists) state.goals = g.data().items || [];
+      try {
+        const x = await db.doc(p.exprs).get();
+        if (x.exists) state.exprs = x.data().exprs || {};
+      } catch (e){ state.exprs = state.exprs || {}; }
+      state.sampleData = !!(state.settings && state.settings.sampleData);
+      const anyDoc = s.exists || a.exists || c.exists || r.exists || g.exists;
+      if (!anyDoc) await seedFirstRun();
+      // The envelope carry chain needs every month, so load them all up front.
+      // At one document per month this stays a handful of small reads for years of history.
+      try {
+        const [tx, bd] = await Promise.all([
+          db.collection("txns").limit(600).get(),
+          db.collection("budget").limit(600).get()
+        ]);
+        tx.docs.forEach(doc => { state.txMonths[doc.id] = (doc.data().items) || []; });
+        bd.docs.forEach(doc => {
+          const dd = doc.data();
+          state.budgetMonths[doc.id] = {budgeted: dd.budgeted || {},
+                                        incomeOverrides: dd.incomeOverrides || undefined};
+        });
+      } catch (e){ await loadMonth(state.activeMonth); }
+      setSave("ok", "saved");
+      return;
+    } catch (e){
+      store.mode = "local"; store.db = null;
+    }
+  } else {
+    store.mode = "local";
+  }
+
+  // 2. fall back to this browser's local storage
+  let raw = null;
+  try { raw = localStorage.getItem(LS_KEY); } catch (e){ raw = null; }
+  if (raw){
+    try { applyPayload(JSON.parse(raw)); setSave("ok", "saved locally"); return; }
+    catch (e){ /* corrupt mirror — fall through to a fresh seed */ }
+  }
+  try { localStorage.setItem(LS_KEY + "-probe", "1"); localStorage.removeItem(LS_KEY + "-probe"); }
+  catch (e){ store.mode = "memory"; }
+  await seedFirstRun();
+  setSave(store.mode === "memory" ? "err" : "ok", store.mode === "memory" ? "not saving — export often" : "saved locally");
+}
+
+async function seedFirstRun(){
+  // A file built with a backup baked in opens with the figures already there,
+  // instead of asking someone to find and import a second file.
+  if (SEED_MODE === "payload"){
+    applyPayload(JSON.parse(JSON.stringify(SEED_PAYLOAD)));
+    persistCore();
+    for (const k of Object.keys(state.txMonths)) persistMonth(k);
+    for (const k of Object.keys(state.budgetMonths)) persistBudget(k);
+    return;
+  }
+  const blank = SEED_MODE === "blank";
+  const s = blank ? blankState() : sampleState();
+  state.settings = s.settings;
+  state.accounts = s.accounts;
+  state.categories = s.categories;
+  state.recurrences = s.recurrences;
+  state.goals = s.goals;
+  state.sampleData = !blank;
+  if (!blank) state.settings.sampleData = true;
+  if (blank) state.tab = "setup";
+  persistCore();
+}
+
+async function loadMonth(key){
+  if (state.txMonths[key]) return;
+  if (store.mode === "db" && store.db){
+    try {
+      const snap = await store.db.doc("txns/" + key).get();
+      state.txMonths[key] = snap.exists ? (snap.data().items || []) : [];
+      return;
+    } catch (e){ /* fall through */ }
+  }
+  state.txMonths[key] = state.txMonths[key] || [];
+}
+
+/* ---- export / import ---- */
+
+function exportPayload(){
+  return {
+    app: "better-budget",
+    version: SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    settings: state.settings,
+    accounts: state.accounts,
+    categories: state.categories,
+    recurrences: state.recurrences,
+    goals: state.goals,
+    exprs: state.exprs || {},
+    transactions: state.txMonths,
+    budgetMonths: state.budgetMonths
+  };
+}
+
+function applyPayload(p){
+  if (!p || p.app !== "better-budget") throw new Error("Not a Better Budget backup file.");
+  state.settings    = p.settings || blankSettings();
+  state.accounts    = p.accounts || [];
+  state.categories  = p.categories || [];
+  state.recurrences = p.recurrences || [];
+  state.goals       = p.goals || [];
+  state.exprs       = p.exprs || {};
+  state.txMonths    = p.transactions || {};
+  state.budgetMonths = p.budgetMonths || {};
+  state.sampleData  = !!state.settings.sampleData;
+}
+
+/* ============================================================
+   5. RENDER
+   ============================================================ */
+
+const el = (t, cls, txt) => {
+  const n = document.createElement(t);
+  if (cls) n.className = cls;
+  if (txt != null) n.textContent = txt;
+  return n;
+};
+
+const TABS = [
+  {id:"dashboard", label:"Dashboard"},
+  {id:"setup",    label:"Setup"},
+  {id:"accounts", label:"Accounts"},
+  {id:"income",   label:"Income"},
+  {id:"expenses", label:"Expenses"},
+  {id:"goals",    label:"Goals"},
+  {id:"budget",   label:"Budget"},
+  {id:"plan",     label:"Plan"},
+  {id:"txns",     label:"Transactions"},
+  {id:"import",   label:"Import"},
+  {id:"schedule", label:"Schedule"},
+  {id:"data",     label:"Data"}
+];
+
+/**
+ * Repaint, putting the caret back where it was.
+ * Every input carries a stable id, so after the pane is rebuilt the same cell can be
+ * refocused and the selection restored. Without this, committing an edit silently
+ * moves focus to <body> and the next thing typed goes nowhere.
+ */
+function render(){
+  const a = document.activeElement;
+  const id = a && a.id ? a.id : null;
+  let ss = null, se = null;
+  if (id){ try { ss = a.selectionStart; se = a.selectionEnd; } catch (e){} }
+
+  // Rebuilding the pane throws away where you were looking. Remember the page
+  // scroll and each table's sideways scroll, and put them back afterwards —
+  // otherwise every edit yanks you to the top.
+  const pageY = window.scrollY || window.pageYOffset || 0;
+  const sideways = Array.prototype.map.call(
+    document.querySelectorAll(".gridwrap"), (w) => w.scrollLeft);
+
+  renderStrip();
+  renderNav();
+  renderPane();
+
+  const restore = () => {
+    try { window.scrollTo(0, pageY); } catch (e){}
+    const wraps = document.querySelectorAll(".gridwrap");
+    for (let i = 0; i < wraps.length && i < sideways.length; i++) wraps[i].scrollLeft = sideways[i];
+    if (id){
+      const n = document.getElementById(id);
+      if (n){
+        try { n.focus({preventScroll:true}); } catch (e){ try { n.focus(); } catch (e2){} }
+        if (ss != null){ try { n.setSelectionRange(ss, se); } catch (e){} }
+      }
+    }
+  };
+  restore();
+  // once more after layout settles, in case content height changed under us
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+}
+
+/**
+ * A commit must never tear down the DOM the browser is still walking. When you click
+ * from one cell to the next, the first cell's change handler fires DURING that focus
+ * transfer — repainting synchronously detaches the cell you are moving into, so the
+ * click never lands and everything you type next is discarded. Deferring past the
+ * current task lets the transfer finish, and coalesces change+blur into one repaint.
+ */
+let _renderQueued = false;
+function scheduleRender(){
+  if (_renderQueued) return;
+  _renderQueued = true;
+  const go = () => { _renderQueued = false; render(); };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(go);
+  else setTimeout(go, 0);
+}
+
+function renderStrip(){
+  const d = derive();
+  const strip = document.getElementById("strip");
+  strip.textContent = "";
+
+  const cells = [
+    {k:"Monthly income",  v:money0(d.incomeM),  s:state.recurrences.filter(r=>r.kind==="income").length + " sources", cls:"pos"},
+    {k:"− Expenses",      v:money0(d.expenseM), s:state.recurrences.filter(r=>r.kind==="expense").length + " recurring", cls:""},
+    {k:"− Minimums",      v:money0(d.minimumsM), s:"debt " + money0(d.debtMinM) + " · contrib " + money0(d.contribMandatoryM), cls:""},
+    {k:"= Free cash",     v:money0(d.freeCashM), s:"per month, before the solver", cls:d.freeCashM >= 0 ? "pos" : "neg", res:true}
+  ];
+  for (const c of cells){
+    const n = el("div", "cell" + (c.res ? " res" : ""));
+    n.appendChild(el("div", "k", c.k));
+    const v = el("div", "v " + c.cls, c.v);
+    n.appendChild(v);
+    n.appendChild(el("div", "s", c.s));
+    strip.appendChild(n);
+  }
+
+  const note = document.getElementById("stripnote");
+  note.textContent = "";
+  const b = el("span", "", "Buffer basis " + money0(d.bufferBasisM) + "/mo (expenses + debt minimums) · " +
+    "1-month target " + money0(d.bufferBasisM) + " · net worth " + money0(d.netWorth));
+  note.appendChild(b);
+}
+
+function renderNav(){
+  const nav = document.getElementById("nav");
+  nav.textContent = "";
+  const counts = {
+    accounts: state.accounts.length,
+    income: state.recurrences.filter(r => r.kind === "income").length,
+    expenses: state.recurrences.filter(r => r.kind === "expense").length,
+    goals: state.goals.length + (state.settings ? (state.settings.bufferTiers || []).length : 0),
+    txns: (state.txMonths[state.activeMonth] || []).length
+  };
+  for (const t of TABS){
+    const b = el("button", "navb");
+    b.type = "button";
+    b.id = "tab-" + t.id;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(state.tab === t.id));
+    b.appendChild(el("span", "", t.label));
+    if (counts[t.id] != null) b.appendChild(el("span", "pill", String(counts[t.id])));
+    b.addEventListener("click", () => { state.tab = t.id; render(); });
+    nav.appendChild(b);
+  }
+}
+
+function renderPane(){
+  const host = document.getElementById("panes");
+  host.textContent = "";
+  const fn = {
+    dashboard: paneDashboard,
+    setup: paneSetup, accounts: paneAccounts, income: () => paneFlows("income"),
+    expenses: () => paneFlows("expense"), budget: paneBudget, plan: panePlan,
+    goals: paneGoals, txns: paneTxns, import: paneImport,
+    schedule: paneSchedule, data: paneData
+  }[state.tab];
+  const ob = offlineBanner();
+  if (ob) host.appendChild(ob);
+  host.appendChild(fn ? fn() : el("div"));
+}
+
+/**
+ * The cloud was configured and could not be read. Everything still works against
+ * this browser's copy, but edits are NOT reaching the account — saying so loudly is
+ * the difference between a safe fallback and a silently diverging second budget.
+ */
+function offlineBanner(){
+  if (!store.cloudError) return null;
+  const b = el("div", "banner warn");
+  const t = el("div", "sp");
+  t.appendChild(el("b", "", "Working from this browser's copy. "));
+  t.appendChild(document.createTextNode(
+    "Your account could not be reached (" + store.cloudError + "), so this is the last " +
+    "version saved on this device. Changes you make now stay here and will NOT reach your " +
+    "account. Download a backup before you do anything else."));
+  b.appendChild(t);
+  const dl = el("button", "btn sm primary", "Download backup");
+  dl.type = "button";
+  dl.addEventListener("click", doExport);
+  b.appendChild(dl);
+  return b;
+}
+
+function sampleBanner(){
+  if (!state.sampleData) return null;
+  const b = el("div", "banner info");
+  const t = el("div", "sp");
+  const strong = el("b", "", "This is sample data, shaped like your 2015 workbook. ");
+  t.appendChild(strong);
+  t.appendChild(document.createTextNode("Edit it in place, or clear everything and start from your real numbers."));
+  b.appendChild(t);
+  const keep = el("button", "btn sm ghost", "It's mine now");
+  keep.type = "button";
+  keep.title = "Keep these rows and stop showing this notice";
+  keep.addEventListener("click", () => {
+    state.sampleData = false;
+    if (state.settings) delete state.settings.sampleData;
+    persistCore("settings"); render();
+  });
+  b.appendChild(keep);
+  const btn = el("button", "btn sm", "Clear it");
+  btn.type = "button";
+  btn.addEventListener("click", clearAll);
+  b.appendChild(btn);
+  return b;
+}
+
+function underwaterBanner(d){
+  if (!d.underwater.length) return null;
+  const b = el("div", "banner warn");
+  const t = el("div", "sp");
+  t.appendChild(el("b", "", "This balance grows forever. "));
+  for (const u of d.underwater){
+    t.appendChild(document.createTextNode(
+      u.name + ": only " + money(u.min) + "/mo reaches the balance" +
+      (u.escrow ? " (after " + money(u.escrow) + " escrow)" : "") +
+      ", against " + money(u.interest) + "/mo of interest. "
+    ));
+  }
+  t.appendChild(document.createTextNode("Raise the payment or the balance grows forever."));
+  b.appendChild(t);
+  return b;
+}
+
+/* ---------- generic editable grid ---------- */
+
+function gridTable(colsIn, rows, opts){
+  const o = opts || {};
+  // The delete control is defined last but belongs first: on a wide table it would
+  // otherwise sit off the right edge, so removing a row would mean scrolling to find it.
+  const cols = colsIn.slice();
+  const di = cols.findIndex(c => c.act || (!c.label && /^3[0-9]px$/.test(String(c.w))));
+  if (di > 0) cols.unshift(cols.splice(di, 1)[0]);
+
+  const wrap = el("div", "gridwrap");
+  const g = el("div", "grid");
+  const template = cols.map(c => c.w).join(" ");
+
+  const head = el("div", "grow head");
+  head.style.gridTemplateColumns = template;
+  for (const c of cols){
+    const h = el("div", "gc");
+    h.appendChild(el("span", "", c.label));
+    if (c.title) h.title = c.title;
+    head.appendChild(h);
+  }
+  g.appendChild(head);
+
+  if (!rows.length){
+    g.appendChild(el("div", "empty", o.emptyText || "Nothing here yet."));
+  }
+  for (const r of rows){
+    const row = el("div", "grow" + (r.locked ? " locked" : ""));
+    row.style.gridTemplateColumns = template;
+    for (const c of cols){
+      const cell = c.cell(r.item, r);
+      // The label rides on the cell so a phone can stack the row and label each field
+      // in place, instead of scrolling a ten-column table sideways.
+      if (c.label) cell.setAttribute("data-label", c.label);
+      row.appendChild(cell);
+    }
+    g.appendChild(row);
+  }
+  wrap.appendChild(g);
+
+  if (o.onAdd){
+    const bar = el("div", "addbar");
+    const b = el("button", "btn sm", o.addLabel || "+ Add row");
+    b.type = "button";
+    b.addEventListener("click", o.onAdd);
+    bar.appendChild(b);
+    wrap.appendChild(bar);
+  }
+  return wrap;
+}
+
+function cellInput(item, field, kind, onCommit, attrs){
+  const c = el("div", "gc");
+  const i = el("input");
+  const a = attrs || {};
+  let last = "";
+  let restoreAtRest = null;
+  i.id = "f-" + (item.id || "new") + "-" + field;
+  if (kind === "money"){
+    i.className = "money"; i.type = "text"; i.inputMode = "decimal";
+    // `signed` fields keep their minus. Showing a negative as positive would make the
+    // next pass through the cell re-commit it with the sign flipped.
+    i.value = item[field] ? (a.signed ? fromCents(item[field]) : fromCents(Math.abs(item[field]))) : "";
+    i.placeholder = "0.00";
+    // At rest the cell shows the total; opening it hands back the formula that made it.
+    const rest = i.value;
+    const held = exprFor(i.id, item[field] || 0);
+    if (held){
+      c.classList.add("hasexpr");
+      const parts = exprParts(held);
+      i.title = held + "\n" + parts.map(x => x.text + "  =  " + money(x.cents)).join("\n") +
+                "\ntotal  " + money(parts.reduce((x, y) => x + y.cents, 0));
+    }
+    i.addEventListener("focus", () => {
+      const e = exprFor(i.id, item[field] || 0);
+      if (e && i.value !== e){ i.value = e; last = e; }
+      setTimeout(() => { try { i.select(); } catch (err){ /* not focusable yet */ } }, 0);
+      showOpBar(i);
+    });
+    i.addEventListener("blur", () => { if (opbar && opbar._target === i) hideOpBar(); });
+    // Leaving a cell untouched must put the total back on screen. This is attached
+    // AFTER the commit handler below, deliberately: restoring first would make the
+    // committer see a changed value and save the total over the formula, so clicking
+    // in and straight out again would silently destroy it.
+    restoreAtRest = () => {
+      if (i.value === last && exprFor(i.id, item[field] || 0)){
+        i.value = rest;
+        last = rest;
+      }
+    };
+  } else if (kind === "date"){
+    i.className = "date"; i.type = "date";
+    i.value = item[field] || "";
+  } else if (kind === "num"){
+    i.className = "n"; i.type = "text"; i.inputMode = "decimal";
+    i.value = item[field] == null ? "" : String(item[field]);
+    i.placeholder = a.placeholder || "";
+  } else {
+    i.type = "text";
+    i.value = item[field] || "";
+    i.placeholder = a.placeholder || "";
+  }
+  if (a.disabled) i.disabled = true;
+  if (a.title) i.title = a.title;
+  // Commit only when the value actually changed. `change` and `blur` both fire on the
+  // way out of a cell, and an unguarded handler would commit twice per edit — and once
+  // more every time you merely tab through a cell you never touched.
+  last = i.value;
+  const commit = () => {
+    if (i.value === last) return;
+    const typed = i.value;
+    last = typed;
+    onCommit(typed, i);
+    // after the handler, so the figure it stored is what the sum is checked against
+    if (kind === "money") setExpr(i.id, typed, toCents(typed));
+  };
+  i.addEventListener("change", commit);
+  i.addEventListener("blur", commit);
+  if (restoreAtRest) i.addEventListener("blur", restoreAtRest);
+  i.addEventListener("keydown", e => { if (e.key === "Enter"){ e.preventDefault(); i.blur(); } });
+  c.appendChild(i);
+  return c;
+}
+
+function cellSelect(item, field, options, onCommit, attrs){
+  const c = el("div", "gc");
+  const s = el("select");
+  const a = attrs || {};
+  s.id = "f-" + (item.id || "new") + "-" + field;
+  for (const op of options){
+    const o = el("option", "", op.label);
+    o.value = op.value;
+    if (String(item[field]) === String(op.value)) o.selected = true;
+    s.appendChild(o);
+  }
+  if (a.disabled) s.disabled = true;
+  if (a.title) s.title = a.title;
+  s.addEventListener("change", () => onCommit(s.value, s));
+  c.appendChild(s);
+  return c;
+}
+
+function cellReadonly(text, cls){
+  const c = el("div", "gc ro" + (cls ? " " + cls : ""));
+  c.textContent = text;
+  return c;
+}
+
+function cellDelete(onDel, disabled, title){
+  const c = el("div", "gc act");
+  const b = el("button", "xbtn", "×");
+  b.type = "button";
+  b.title = title || "Delete row";
+  b.setAttribute("aria-label", title || "Delete row");
+  if (disabled){ b.disabled = true; b.style.opacity = ".3"; b.style.cursor = "not-allowed"; }
+  else b.addEventListener("click", onDel);
+  c.appendChild(b);
+  return c;
+}
+
+/**
+ * Delete, and beside it duplicate. Copying a row is how you handle a figure that
+ * changes partway through: end the old row and let the copy carry the new amount,
+ * rather than editing history out from under the months already budgeted.
+ */
+function cellRowActions(onDel, onCopy, copyTitle){
+  const c = el("div", "gc act");
+  const d = el("button", "xbtn", "\u00d7");
+  d.type = "button";
+  d.title = "Delete row";
+  d.setAttribute("aria-label", "Delete row");
+  d.addEventListener("click", onDel);
+  c.appendChild(d);
+  const k = el("button", "cbtn", "\u29c9");
+  k.type = "button";
+  k.title = copyTitle || "Duplicate this row";
+  k.setAttribute("aria-label", "Duplicate row");
+  k.addEventListener("click", onCopy);
+  c.appendChild(k);
+  return c;
+}
+
+/* ---------- panes ---------- */
+
+/**
+ * "What changed" — a static chart is wallpaper; a diff is a consequence.
+ * The snapshot is a per-viewer convenience, so it lives in browser storage and the
+ * page renders perfectly without it.
+ */
+function changeStrip(R){
+  const sim = R.sim;
+  const snap = {low: sim.low.v, goals: {}};
+  for (const g of R.goals){
+    const a = sim.achieved[g.id];
+    snap.goals[g.id] = a ? a.date : null;
+  }
+  let prev = null;
+  try { prev = JSON.parse(localStorage.getItem("bb-snapshot") || "null"); } catch (e){ prev = null; }
+  try { localStorage.setItem("bb-snapshot", JSON.stringify(snap)); } catch (e){ /* fine without it */ }
+  if (!prev || !prev.goals) return null;
+
+  const items = [];
+  for (const g of R.goals){
+    const now = snap.goals[g.id], was = prev.goals[g.id];
+    if (was === undefined || now === was) continue;
+    if (was && now){
+      const dd = diffDays(was, now);
+      if (!dd) continue;
+      items.push({txt: g.name + " " + Math.abs(dd) + " day" + (Math.abs(dd) === 1 ? "" : "s") +
+                       (dd > 0 ? " later" : " earlier"), good: dd < 0});
+    } else if (now && !was){
+      items.push({txt: g.name + " now reachable · " + shortDate(now), good: true});
+    } else if (!now && was){
+      items.push({txt: g.name + " no longer reached in the horizon", good: false});
+    }
+  }
+  if (prev.low != null && prev.low !== snap.low){
+    const dd = snap.low - prev.low;
+    items.push({txt: "lowest cash " + (dd > 0 ? "+" : "") + money0(dd), good: dd > 0});
+  }
+  if (!items.length) return null;
+
+  const box = el("div", "changed");
+  box.appendChild(el("span", "clabel", "Since you last looked"));
+  for (const i of items){
+    const c = el("span", "chip " + (i.good ? "good" : "bad"));
+    c.textContent = i.txt;
+    box.appendChild(c);
+  }
+  return box;
+}
+
+/** The numbered diamonds on the curve, spelled out beside it: date, then what happens. */
+/* ---------- the original plan ---------- */
+
+/**
+ * Once the setup is confirmed the plan is worth freezing, because every later change
+ * is only meaningful against something. It lives in settings so it follows the file
+ * into every backend and out through the export.
+ */
+function captureBaseline(R){
+  const sim = R.sim;
+  const b = {savedAt: todayISO(), asOfDate: state.settings.asOfDate, goals: {},
+             low_c: sim.low.v, lowDate: sim.low.date, netEnd_c: sim.net[sim.nDays], debtFree: null};
+  for (const g of (R.goals || [])){
+    const a = sim.achieved[g.id];
+    b.goals[g.id] = {name: g.name, date: a ? a.date : null, target_c: g.target_c};
+  }
+  const df = (sim.events || []).find(e => e.text === "Debt free");
+  b.debtFree = df ? df.date : null;
+  state.settings.baseline = b;
+  persistCore("settings");
+}
+
+/** What has moved since the plan was locked. Returns null when there is nothing to say. */
+function baselineDrift(R){
+  const b = state.settings.baseline;
+  if (!b || !b.goals) return null;
+  const sim = R.sim, items = [];
+  for (const g of (R.goals || [])){
+    const was = b.goals[g.id];
+    const a = sim.achieved[g.id];
+    const now = a ? a.date : null;
+    if (!was){
+      items.push({txt: g.name + " added since" + (now ? " · " + shortDate(now) : ""), good: null});
+      continue;
+    }
+    if (was.date && now){
+      const dd = diffDays(was.date, now);
+      if (!dd) continue;
+      items.push({txt: g.name + " " + Math.abs(dd) + " day" + (Math.abs(dd) === 1 ? "" : "s") +
+                       (dd > 0 ? " later" : " earlier") + " than planned", good: dd < 0});
+    } else if (now && !was.date){
+      items.push({txt: g.name + " now reachable · " + shortDate(now), good: true});
+    } else if (!now && was.date){
+      items.push({txt: g.name + " has fallen out of the horizon", good: false});
+    }
+  }
+  for (const id of Object.keys(b.goals)){
+    if (!(R.goals || []).some(g => g.id === id)) items.push({txt: b.goals[id].name + " removed", good: null});
+  }
+  if (b.low_c != null && b.low_c !== sim.low.v){
+    const dd = sim.low.v - b.low_c;
+    items.push({txt: "lowest cash " + (dd > 0 ? "+" : "") + money0(dd) + " vs plan", good: dd > 0});
+  }
+  return {baseline: b, items: items};
+}
+
+/** The header control plus, once locked, the drift strip. */
+function baselineSection(R){
+  const wrap = el("div");
+  const d = baselineDrift(R);
+  const bar = el("div", "planbar");
+
+  if (!d){
+    bar.appendChild(el("span", "clabel", "Original plan"));
+    bar.appendChild(el("span", "lede",
+      "Lock this projection in once your setup is right and every change after it is measured against it."));
+    const lock = el("button", "btn sm primary", "Lock this as my original plan");
+    lock.type = "button";
+    lock.addEventListener("click", () => { captureBaseline(R); render(); });
+    bar.appendChild(lock);
+    wrap.appendChild(bar);
+    return wrap;
+  }
+
+  bar.appendChild(el("span", "clabel", "Original plan · locked " + shortDate(d.baseline.savedAt)));
+  if (!d.items.length){
+    bar.appendChild(el("span", "chip good", "still exactly on plan"));
+  } else {
+    for (const i of d.items){
+      const c = el("span", "chip " + (i.good === null ? "" : (i.good ? "good" : "bad")));
+      c.textContent = i.txt;
+      bar.appendChild(c);
+    }
+  }
+  bar.appendChild(el("div", "sp"));
+  const re = el("button", "btn sm", "Re-lock to today");
+  re.type = "button";
+  re.title = "Replace the original plan with the projection as it stands now.";
+  re.addEventListener("click", () => {
+    if (!confirm("Replace your original plan with today's projection? The old one is not kept.")) return;
+    captureBaseline(R); render();
+  });
+  bar.appendChild(re);
+  wrap.appendChild(bar);
+  return wrap;
+}
+
+function milestoneKey(sim){
+  const wrap = el("div", "mkey");
+  wrap.appendChild(el("h3", "", "Milestones"));
+  const evs = (sim.events || []).slice(0, 12);
+  if (!evs.length){
+    wrap.appendChild(el("p", "none", "No goal is reached inside the horizon yet."));
+    return wrap;
+  }
+  const ol = el("ol");
+  evs.forEach((ev, i) => {
+    const li = el("li");
+    const pip = el("span", "pip");
+    pip.innerHTML = '<svg viewBox="0 0 18 18" class="chart" aria-hidden="true">' +
+      '<path d="M9 2L16 9L9 16L2 9Z" class="mstone"/>' +
+      '<text x="9" y="9.5" class="mnum" text-anchor="middle" dominant-baseline="middle">' + (i + 1) + '</text></svg>';
+    li.appendChild(pip);
+    const txt = el("div");
+    txt.appendChild(el("span", "mdate", longDate(ev.date)));
+    txt.appendChild(el("span", "mwhat", ev.text));
+    li.appendChild(txt);
+    ol.appendChild(li);
+  });
+  wrap.appendChild(ol);
+  return wrap;
+}
+
+function paneDashboard(){
+  const pane = el("div");
+  const d = derive();
+
+  if (!state.accounts.length || !state.recurrences.length){
+    const b = el("div", "banner info");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Nothing to project yet. "));
+    t.appendChild(document.createTextNode("Add at least one account and one recurring row and the graph appears here."));
+    b.appendChild(t);
+    pane.appendChild(b);
+    return pane;
+  }
+
+  const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+  const R = solve();
+  const sim = R.sim, base = R.base;
+  const ms = t0 ? ((typeof performance !== "undefined" ? performance.now() : 0) - t0) : 0;
+
+  const chg = changeStrip(R); if (chg) pane.appendChild(chg);
+  pane.appendChild(baselineSection(R));
+
+  // A goal with no account behind it is money parked in checking earning nothing.
+  // It is easy to create by accident, because the account dropdown defaults to none.
+  // The locked buffer goal is excluded: it is not editable on the Goals tab, so the
+  // "Fix on Goals" button would send you somewhere that cannot fix it. Its own guidance
+  // lives on Accounts and on the Goals-tab buffer ladder.
+  const orphan = (R.goals || []).filter(g => g.unlinked && !g.locked);
+  if (orphan.length){
+    const b = el("div", "banner warn");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", orphan.length === 1 ? "One goal has no account behind it. "
+                                                  : orphan.length + " goals have no account behind them. "));
+    t.appendChild(document.createTextNode(
+      orphan.map(g => g.name).join(", ") + " — money set aside for " +
+      (orphan.length === 1 ? "it" : "them") + " stays in " + esc(sim.opName) +
+      " and earns nothing. Pick a Linked account on the Goals tab so it actually goes somewhere and grows."));
+    b.appendChild(t);
+    const go = el("button", "btn sm", "Fix on Goals");
+    go.type = "button";
+    go.addEventListener("click", () => { state.tab = "goals"; render(); window.scrollTo({top:0}); });
+    b.appendChild(go);
+    pane.appendChild(b);
+  }
+
+  // Nowhere for surplus to go once the goals close.
+  if (!state.accounts.some(a => a.isSweep) && R.goals && R.goals.length){
+    const idle = sim.cash[sim.nDays] - sim.floorSeries[sim.nDays];
+    if (idle > 5000000){
+      const b = el("div", "banner warn");
+      const t = el("div", "sp");
+      t.appendChild(el("b", "", money0(idle) + " ends up sitting in cash. "));
+      t.appendChild(document.createTextNode(
+        "Once every goal is funded the surplus has nowhere to go, so it piles up in " + esc(sim.opName) +
+        " earning nothing. Mark an investment account “Invest the rest here” on the Accounts tab and it " +
+        "will compound instead."));
+      b.appendChild(t);
+      const go = el("button", "btn sm", "Set one");
+      go.type = "button";
+      go.addEventListener("click", () => { state.tab = "accounts"; render(); window.scrollTo({top:0}); });
+      b.appendChild(go);
+      pane.appendChild(b);
+    }
+  }
+
+  const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
+
+  // Sinking funds larger than the cash actually held. This is a DIFFERENT problem from
+  // overspending and must not read as one: the money is committed on paper but isn't
+  // there, so the solver correctly finds no capacity at all.
+  const ear0 = (sim.envelopes || []).reduce((t, e) => t + Math.max(0, e.start_c), 0);
+  if (ear0 > 0 && sim.cash[0] < sim.floor_c){
+    const b = el("div", "banner warn");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Your reserved money exceeds the cash you hold. "));
+    t.appendChild(document.createTextNode(
+      "Sinking funds hold " + money(ear0) + " and the guard plus buffer another " + money(sim.floorBase_c) +
+      ", which is " + money(sim.floor_c) + " committed against " + money(sim.cash[0]) + " in the bank — short by " +
+      money(sim.floor_c - sim.cash[0]) + ". Nothing is wrong with the projection; the envelopes are simply " +
+      "promising money that isn't there yet. Reduce a sinking fund, or let it fill over time."));
+    b.appendChild(t);
+    const go = el("button", "btn sm", "Open budget");
+    go.type = "button";
+    go.addEventListener("click", () => { state.tab = "budget"; render(); window.scrollTo({top:0}); });
+    b.appendChild(go);
+    pane.appendChild(b);
+  }
+
+  // escrow warning — a mortgage-shaped payment with no escrow split declared
+  const noEscrow = state.accounts.filter(a =>
+    ACCOUNT_KINDS[a.kind] && ACCOUNT_KINDS[a.kind].debt &&
+    a.kind === "loan" && a.minPayment_c >= 100000 && !(a.escrow_c > 0));
+  if (noEscrow.length){
+    const b = el("div", "banner warn");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Is any of that payment escrow? "));
+    t.appendChild(document.createTextNode(
+      noEscrow.map(a => a.name).join(", ") + ": every cent of the payment is currently being applied to the " +
+      "balance. If taxes and insurance are bundled into it, set the escrow amount on the Accounts tab — " +
+      "it is the difference between a 17-year and a 35-year payoff."));
+    b.appendChild(t);
+    const go = el("button", "btn sm", "Set escrow");
+    go.type = "button";
+    go.addEventListener("click", () => { state.tab = "accounts"; render(); window.scrollTo({top:0}); });
+    b.appendChild(go);
+    pane.appendChild(b);
+  }
+
+  // ---------- KPI strip ----------
+  const kpis = el("div", "kpis");
+  const mk = (k, v, s, cls) => {
+    const c = el("div", "kpi");
+    c.appendChild(el("div", "k", k));
+    const vv = el("div", "v" + (cls ? " " + cls : ""), v);
+    c.appendChild(vv);
+    c.appendChild(el("div", "s", s));
+    return c;
+  };
+  const netNow = sim.net[0], netEnd = sim.net[sim.nDays];
+  kpis.appendChild(mk("Net worth today", money0(netNow), d.assetTotal ? "assets " + money0(d.assetTotal) + " · debt " + money0(d.debtTotal) : "—",
+    netNow >= 0 ? "pos" : "neg"));
+  kpis.appendChild(mk("Lowest cash", money0(sim.low.v), shortDate(sim.low.date) + " · " +
+    (sim.lowMargin >= 0 ? money0(sim.lowMargin) + " above the floor" : money0(-sim.lowMargin) + " BELOW the floor"),
+    sim.lowMargin >= 0 ? "pos" : "neg"));
+  kpis.appendChild(mk("Debt free", sim.debtFree ? shortDate(sim.debtFree.date) : (d.debtTotal ? "beyond " + Math.round(sim.nDays/365) + " yrs" : "no debt"),
+    sim.debtFree ? "on minimums alone" : "minimums alone won't clear it in view", sim.debtFree ? "pos" : ""));
+  const saved = base.totalInterest - sim.totalInterest;
+  kpis.appendChild(mk("Interest paid", money0(sim.totalInterest),
+    saved > 0 ? money0(saved) + " less than doing nothing" : "over " + Math.round(sim.nDays/365) + " years", "neg"));
+  kpis.appendChild(mk("Net worth in " + Math.round(sim.nDays/365) + " yrs", money0(netEnd),
+    (netEnd - netNow >= 0 ? "+" : "") + money0(netEnd - netNow) + " from today", netEnd >= netNow ? "pos" : "neg"));
+  pane.appendChild(kpis);
+
+  // ---------- the graph ----------
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Where this goes"));
+  h.appendChild(el("div", "sp"));
+  h.appendChild(el("span", "savechip", R.plan.length
+    ? "with the plan applied · " + R.plan.length + " paydays deployed"
+    : "minimum payments only — no goals to fund"));
+  sec.appendChild(h);
+
+  const row = el("div", "chartrow");
+  const box = el("div", "chartbox");
+  box.innerHTML = chartSVG(sim);
+  row.appendChild(box);
+  row.appendChild(milestoneKey(sim));
+  sec.appendChild(row);
+
+  const legend = el("div", "legend");
+  const items = [
+    ["c-net", "Net worth"], ["c-cash", "Cash"], ["c-liab", "Liabilities"],
+    ["c-inv", "Investments"], ["c-save", "Savings"]
+  ];
+  for (const [v, label] of items){
+    const li = el("span", "legitem");
+    const sw = el("span", "swatch");
+    sw.style.background = "var(--" + v + ")";
+    li.appendChild(sw);
+    li.appendChild(el("span", "", label));
+    legend.appendChild(li);
+  }
+  const perf = el("span", "legperf", ms ? ("simulated " + (sim.nDays + 1).toLocaleString() + " days in " + ms.toFixed(0) + " ms") : "");
+  legend.appendChild(perf);
+  sec.appendChild(legend);
+  pane.appendChild(sec);
+
+  // ---------- what the simulator did ----------
+  const sec2 = el("div", "sec");
+  const h2 = el("div", "sechead");
+  h2.appendChild(el("h2", "", "Accounts at the end of the horizon"));
+  sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "Balances on " + shortDate(addDays(sim.start, sim.nDays)) + " if nothing changes and only contractual " +
+    "minimums are paid. Surplus simply piles up in " + esc(sim.opName) + " — the solver that puts it to work is M6."));
+
+  const cols = [
+    {label:"Account", w:"minmax(150px,1.4fr)", cell:(a) => cellReadonly(a.name || "(unnamed)", "lbl")},
+    {label:"Type", w:"minmax(120px,.9fr)", cell:(a) => cellReadonly(ACCOUNT_KINDS[a.kind] ? ACCOUNT_KINDS[a.kind].label : a.kind, "lbl")},
+    {label:"Today", w:"minmax(115px,.9fr)", cell:(a) => cellReadonly(money0(a.openingBalance_c))},
+    {label:"End of horizon", w:"minmax(130px,1fr)", cell:(a) => {
+        const c = el("div", "gc ro");
+        const v = el("span", a.bal > a.openingBalance_c ? "num pos" : (a.bal < a.openingBalance_c ? "num neg" : "num"), money0(a.bal));
+        c.appendChild(v);
+        return c;
+      }},
+    {label:"Change", w:"minmax(120px,.9fr)", cell:(a) => cellReadonly(money0(a.bal - a.openingBalance_c))}
+  ];
+  sec2.appendChild(gridTable(cols, sim.accts.map(a => ({item:a})), {emptyText:"No accounts."}));
+  pane.appendChild(sec2);
+
+  return pane;
+}
+
+function paneSetup(){
+  const d = derive();
+  const pane = el("div");
+  const sb = sampleBanner(); if (sb) pane.appendChild(sb);
+  const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Setup"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Five steps, in the order you described. Nothing is blocking — jump to any of them. " +
+    "Everything you enter feeds the free-cash figure above, which is exactly what the solver will consume at M6."));
+
+  const steps = el("div", "steps");
+  const defs = [
+    {n:1, tab:"income",   t:"Income sources", done: d.incomeM > 0,
+     s: state.recurrences.filter(r=>r.kind==="income").length + " sources · " + money0(d.incomeM) + "/mo"},
+    {n:2, tab:"expenses", t:"Expenses", done: d.expenseM > 0,
+     s: state.recurrences.filter(r=>r.kind==="expense").length + " recurring · " + money0(d.expenseM) + "/mo"},
+    {n:3, tab:"goals",    t:"Savings buffer", done: d.bufferBasisM > 0,
+     s: "1-month target " + money0(d.bufferBasisM) + " — derived, priority locked"},
+    {n:4, tab:"accounts", t:"Debts & investments", done: state.accounts.some(a => ACCOUNT_KINDS[a.kind] && (ACCOUNT_KINDS[a.kind].debt || a.kind === "investment")),
+     s: state.accounts.length + " accounts · minimums " + money0(d.minimumsM) + "/mo"},
+    {n:5, tab:"goals",    t:"Financial goals", done: state.goals.length > 0,
+     s: state.goals.length + " goals · " + state.goals.filter(g=>g.targetDate).length + " dated, " + state.goals.filter(g=>!g.targetDate).length + " ASAP"}
+  ];
+  for (const s of defs){
+    const row = el("div", "step" + (s.done ? " done" : ""));
+    row.appendChild(el("div", "stepn", s.done ? "✓" : String(s.n)));
+    const t = el("div", "t");
+    t.appendChild(el("b", "", s.t));
+    t.appendChild(el("span", "", s.s));
+    row.appendChild(t);
+    const b = el("button", "btn sm", s.done ? "Review" : "Start");
+    b.type = "button";
+    b.addEventListener("click", () => { state.tab = s.tab; render(); window.scrollTo({top:0}); });
+    row.appendChild(b);
+    steps.appendChild(row);
+  }
+  sec.appendChild(steps);
+  pane.appendChild(sec);
+
+  // reserve ladder
+  const sec2 = el("div", "sec");
+  const h2 = el("div", "sechead");
+  h2.appendChild(el("h2", "", "Reserve ladder"));
+  sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "Derived from your buffer basis — living expenses plus minimum debt payments, the definition you chose. " +
+    "The 1-month tier is priority 0 and immovable; the rest sit at the bottom of the priority list until you change them."));
+  const cards = el("div", "cards");
+  for (const t of d.tiers){
+    const c = el("div", "card");
+    c.appendChild(el("div", "k", t.months === 1 ? "1 month — locked" : t.months + " months"));
+    c.appendChild(el("div", "v", money0(t.amount_c)));
+    c.appendChild(el("div", "s", t.months === 1 ? "priority 0, unchangeable" : "lowest priority until changed"));
+    cards.appendChild(c);
+  }
+  sec2.appendChild(cards);
+  pane.appendChild(sec2);
+  return pane;
+}
+
+/** The three numbers everything else is measured from. They belong beside the
+ *  balances they describe, not buried in a settings tab. */
+function startingPointSection(){
+  const s = state.settings || blankSettings();
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Starting point"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Where the projection begins. Balances below are taken to be true as of this date, " +
+    "and the floor is the line your cash is never planned to fall through."));
+
+  const row = el("div", "startgrid");
+
+  const fld = (label, hint, build) => {
+    const f = el("div", "fld");
+    f.style.margin = "0";
+    f.appendChild(el("label", "", label));
+    f.appendChild(build());
+    f.appendChild(el("div", "hint", hint));
+    row.appendChild(f);
+  };
+
+  fld("Balances as of", "Anything dated on or before this is already inside the balances.", () => {
+    const i = el("input"); i.type = "date"; i.id = "set-asof";
+    i.value = s.asOfDate || todayISO();
+    i.addEventListener("change", () => { s.asOfDate = i.value; persistCore("settings"); render(); });
+    return i;
+  });
+
+  fld("Operating floor", "A hard guard the plan may never dip below.", () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-floor";
+    i.value = fromCents(s.operatingFloor_c || 0);
+    i.addEventListener("change", () => {
+      s.operatingFloor_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.operatingFloor_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  const bufAcct = bufferAccount();
+  fld("Buffer already saved",
+      bufAcct
+        ? "Held in " + (bufAcct.name || "your buffer account") + ", so its balance is the figure that counts. Set there, not here."
+        : "Buffer money sitting in the operating account. Added to the floor so it is never spent. Better: mark a savings account \u201cBuffer lives here\u201d below.",
+      () => {
+    const i = el("input"); i.type = "text"; i.inputMode = "decimal"; i.id = "set-bufheld";
+    if (bufAcct){ i.disabled = true; i.value = fromCents(bufferFunded_c()); return i; }
+    i.value = fromCents(s.bufferHeld_c || 0);
+    i.addEventListener("change", () => {
+      s.bufferHeld_c = Math.abs(toCents(i.value));
+      i.value = fromCents(s.bufferHeld_c);
+      persistCore("settings"); render();
+    });
+    return i;
+  });
+
+  sec.appendChild(row);
+  sec.appendChild(el("p", "hint",
+    "Effective floor: " + money((s.operatingFloor_c || 0) + (bufferAccount() ? 0 : (s.bufferHeld_c || 0))) +
+    ", plus whatever your sinking funds hold." +
+    (bufferAccount() ? " Your buffer is held outside the operating account, so it does not raise this floor." : "")));
+  return sec;
+}
+
+function paneAccounts(){
+  const d = derive();
+  const pane = el("div");
+  pane.appendChild(startingPointSection());
+  const uw = underwaterBanner(d); if (uw) pane.appendChild(uw);
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Accounts"));
+  h.appendChild(el("div", "sp"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Cash, debts and investments in one table. Balances are signed: debts are negative. " +
+    "A minimum payment here is the only source of a contractual minimum — don't also enter it as a recurring expense, " +
+    "or it will be counted twice."));
+
+  const kindOpts = Object.keys(ACCOUNT_KINDS).map(k => ({value:k, label:ACCOUNT_KINDS[k].label}));
+  const compOpts = COMPOUNDING.map(c => ({value:c, label:c[0].toUpperCase() + c.slice(1)}));
+
+  const cols = [
+    {label:"Name", w:"minmax(150px,1.4fr)", cell:(a) => cellInput(a, "name", "text", v => { a.name = v; persistCore("accounts"); scheduleRender(); }, {placeholder:"Account name"})},
+    {label:"Type", w:"minmax(140px,1fr)",   cell:(a) => cellSelect(a, "kind", kindOpts, v => { a.kind = v; persistCore("accounts"); scheduleRender(); })},
+    {label:"Balance", w:"minmax(110px,.9fr)", title:"Current balance. Negative for debts.",
+      cell:(a) => cellInput(a, "openingBalance_c", "money", (v, i) => {
+        const k = ACCOUNT_KINDS[a.kind];
+        const mag = Math.abs(toCents(v));
+        a.openingBalance_c = k && k.debt ? -mag : mag;
+        i.value = mag ? fromCents(mag) : "";
+        persistCore("accounts"); render();
+      })},
+    {label:"APR %", w:"minmax(80px,.55fr)", title:"Annual rate. 17 means 17%.",
+      cell:(a) => {
+        const shim = {id:a.id, apr: a.apr_bps ? (a.apr_bps / 100) : ""};
+        return cellInput(shim, "apr", "num", v => {
+          const n = parseFloat(v); a.apr_bps = Number.isFinite(n) ? Math.round(n * 100) : 0;
+          persistCore("accounts"); scheduleRender();
+        }, {placeholder:"0"});
+      }},
+    {label:"Compounds", w:"minmax(115px,.8fr)", cell:(a) => cellSelect(a, "compounding", compOpts, v => { a.compounding = v; persistCore("accounts"); })},
+    {label:"Payment", w:"minmax(150px,1fr)", title:"Pay in full = a card you use to smooth spending and clear every payday. It never revolves, so it never accrues interest.",
+      cell:(a) => cellSelect(a, "paymentMode",
+        [{value:"minimum", label:"Minimum only"}, {value:"full", label:"Pay in full each cycle"}],
+        v => { a.paymentMode = v; persistCore("accounts"); scheduleRender(); },
+        {disabled: !(ACCOUNT_KINDS[a.kind] && ACCOUNT_KINDS[a.kind].debt)})},
+    {label:"Min pmt", w:"minmax(100px,.8fr)", title:"Contractual monthly minimum. Ignored when the account is paid in full each cycle.",
+      cell:(a) => cellInput(a, "minPayment_c", "money", (v, i) => {
+        a.minPayment_c = Math.abs(toCents(v)); i.value = a.minPayment_c ? fromCents(a.minPayment_c) : "";
+        persistCore("accounts"); render();
+      })},
+    {label:"of which escrow", w:"minmax(112px,.85fr)", title:"The part of the payment that is taxes and insurance. It leaves your cash but never reduces the balance — on a mortgage this is the difference between a 17-year and a 35-year payoff.",
+      cell:(a) => cellInput(a, "escrow_c", "money", (v, i) => {
+        a.escrow_c = Math.abs(toCents(v)); i.value = a.escrow_c ? fromCents(a.escrow_c) : "";
+        persistCore("accounts"); render();
+      }, {disabled: !(ACCOUNT_KINDS[a.kind] && ACCOUNT_KINDS[a.kind].debt)})},
+    {label:"Due day", w:"minmax(78px,.5fr)", title:"Day of month. 29–31 clamp to the month's last day.",
+      cell:(a) => cellInput(a, "dueDay", "num", v => {
+        const n = parseInt(v, 10);
+        a.dueDay = Number.isFinite(n) ? Math.min(31, Math.max(1, n)) : 0;
+        persistCore("accounts"); render();
+      }, {placeholder:"—"})},
+    {label:"Contribution", w:"minmax(105px,.8fr)", title:"Recurring contribution into this account (investments).",
+      cell:(a) => {
+        const shim = {id:a.id, amt: a.contribution ? a.contribution.amount_c : 0};
+        return cellInput(shim, "amt", "money", (v, i) => {
+          const c = Math.abs(toCents(v));
+          if (c){
+            a.contribution = a.contribution || {amount_c:0, frequency:"MONTHLY", mandatory:true};
+            a.contribution.amount_c = c;
+          } else a.contribution = null;
+          i.value = c ? fromCents(c) : "";
+          persistCore("accounts"); render();
+        });
+      }},
+    {label:"Leftover cash", w:"minmax(150px,1fr)", title:"Send everything left over, once every goal is funded, into this account — where it compounds instead of sitting idle.",
+      cell:(a) => {
+        const k = ACCOUNT_KINDS[a.kind];
+        const shim = {id:a.id, s: a.isSweep ? "yes" : "no"};
+        return cellSelect(shim, "s", [{value:"no", label:"—"}, {value:"yes", label:"Invest the rest here"}],
+          v => {
+            // exactly one sweep account, or the surplus would have two homes
+            for (const x of state.accounts) x.isSweep = false;
+            a.isSweep = (v === "yes");
+            persistCore("accounts"); render();
+          }, {disabled: !(k && !k.debt)});
+      }},
+    {label:"Holds the buffer", w:"minmax(150px,1fr)",
+      title:"The account your mandatory savings buffer is kept in. Its balance IS the buffer, so anything the budget pays in counts toward it.",
+      cell:(a) => {
+        const k = ACCOUNT_KINDS[a.kind];
+        const shim = {id:a.id, b: a.isBuffer ? "yes" : "no"};
+        return cellSelect(shim, "b", [{value:"no", label:"\u2014"}, {value:"yes", label:"Buffer lives here"}],
+          v => {
+            // exactly one buffer account, or the target would be funded from two places
+            for (const x of state.accounts) x.isBuffer = false;
+            a.isBuffer = (v === "yes");
+            // the hand-typed figure was a stand-in for exactly this; keeping both
+            // would reserve the same money twice
+            if (a.isBuffer && state.settings) state.settings.bufferHeld_c = 0;
+            persistCore("accounts"); persistCore("settings"); render();
+          }, {disabled: !(k && !k.debt)});
+      }},
+    {label:"Contrib is", w:"minmax(120px,.85fr)", title:"Mandatory contributions reduce free cash. Discretionary ones the solver may redirect.",
+      cell:(a) => {
+        const shim = {id:a.id, m: a.contribution ? String(a.contribution.mandatory) : "true"};
+        return cellSelect(shim, "m", [{value:"true", label:"Mandatory"}, {value:"false", label:"Solver may move"}], v => {
+          if (a.contribution) a.contribution.mandatory = (v === "true");
+          persistCore("accounts"); scheduleRender();
+        }, {disabled: !a.contribution});
+      }},
+    {label:"", w:"36px", cell:(a) => cellDelete(() => {
+        state.accounts = state.accounts.filter(x => x.id !== a.id);
+        persistCore("accounts"); render();
+      })}
+  ];
+
+  sec.appendChild(gridTable(cols, state.accounts.map(a => ({item:a})), {
+    emptyText: "No accounts yet. Add your checking account first — it's the operating account everything settles through.",
+    addLabel: "+ Add account",
+    onAdd: () => {
+      state.accounts.push({
+        id: uid("a"), name: "", kind: "cash", openingBalance_c: 0, apr_bps: 0,
+        compounding: "monthly", minPayment_c: 0, escrow_c: 0, paymentMode: "minimum",
+        isSweep: false, isBuffer: false, dueDay: 0, originalPrincipal_c: 0,
+        originationDate: "", contribution: null, participatesInBudget: true
+      });
+      persistCore("accounts"); render();
+    }
+  }));
+  pane.appendChild(sec);
+
+  const d2 = derive();
+  const cards = el("div", "cards");
+  const mk = (k, v, s, cls) => {
+    const c = el("div", "card");
+    c.appendChild(el("div", "k", k));
+    const vv = el("div", "v", v); if (cls) vv.style.color = "var(--" + cls + ")";
+    c.appendChild(vv);
+    c.appendChild(el("div", "s", s));
+    return c;
+  };
+  cards.appendChild(mk("Assets", money0(d2.assetTotal), "cash, savings, investments", "pos"));
+  cards.appendChild(mk("Liabilities", money0(d2.debtTotal), "cards and loans", "neg"));
+  cards.appendChild(mk("Net worth", money0(d2.netWorth), "today, before any projection"));
+  cards.appendChild(mk("Minimums", money0(d2.minimumsM) + "/mo", "debt " + money0(d2.debtMinM) + " + mandatory contrib " + money0(d2.contribMandatoryM)));
+  pane.appendChild(cards);
+  return pane;
+}
+
+function paneFlows(kind){
+  const isIncome = kind === "income";
+  const pane = el("div");
+  const sb = sampleBanner(); if (sb) pane.appendChild(sb);
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", isIncome ? "Income" : "Expenses"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede", isIncome
+    ? "Every source, with its exact next date. Paydays are what the solver will use as allocation dates — it derives them from these rows rather than the legacy workbook's fake $0.01 income line."
+    : "Every recurring expense. Amounts are entered positive; they're stored as outflows. Mark a category earmarked when it's a sinking fund, so the solver treats its balance as spoken for rather than spare cash."));
+
+  const freqOpts = FREQ_KEYS.map(k => ({value:k, label:FREQ[k].label}));
+  // A leading blank keeps a stale or missing accountId visible instead of silently
+  // snapping the row onto whichever account happens to sort first.
+  const accOpts  = [{value:"", label:"— pick an account —"}]
+    .concat(state.accounts.map(a => ({value:a.id, label:a.name || "(unnamed)"})));
+  const catOpts  = [{value:"", label:"—"}].concat(state.categories.map(c => ({value:c.id, label:c.group + " · " + c.name})));
+  const bizOpts  = Object.keys(BIZ_POLICY).map(k => ({value:k, label:BIZ_POLICY[k]}));
+  const meOpts   = Object.keys(MONTH_END_POLICY).map(k => ({value:k, label:MONTH_END_POLICY[k]}));
+
+  const rows = state.recurrences.filter(r => r.kind === kind);
+
+  const cols = [
+    {label: isIncome ? "Payor" : "Name", w:"minmax(140px,1.3fr)",
+      cell:(r) => cellInput(r, "name", "text", v => { r.name = v; persistCore("recurrences"); scheduleRender(); }, {placeholder: isIncome ? "Who pays you" : "What it is"})},
+    {label:"Category", w:"minmax(150px,1.1fr)",
+      cell:(r) => cellSelect(r, "categoryId", catOpts, v => { r.categoryId = v; persistCore("recurrences"); })},
+    {label:"Account", w:"minmax(125px,.9fr)",
+      cell:(r) => cellSelect(r, "accountId", accOpts, v => { r.accountId = v; persistCore("recurrences"); })},
+    {label:"Amount", w:"minmax(100px,.8fr)",
+      cell:(r) => cellInput(r, "amount_c", "money", (v, i) => {
+        const mag = Math.abs(toCents(v));
+        r.amount_c = mag; i.value = mag ? fromCents(mag) : "";
+        persistCore("recurrences"); render();
+      })},
+    {label:"Frequency", w:"minmax(130px,.95fr)",
+      cell:(r) => cellSelect(r, "frequency", freqOpts, v => { r.frequency = v; persistCore("recurrences"); scheduleRender(); })},
+    {label:"N", w:"minmax(52px,.32fr)", title:"The interval, for the 'Every N …' frequencies.",
+      cell:(r) => cellInput(r, "intervalN", "num", v => {
+        const n = parseInt(v, 10);
+        r.intervalN = Number.isFinite(n) ? Math.max(1, Math.min(60, n)) : 1;
+        persistCore("recurrences"); render();
+      }, {disabled: !(FREQ[r.frequency] && FREQ[r.frequency].interval), placeholder:"—"})},
+    {label:"Anchor date", w:"minmax(140px,.95fr)", title:"Every occurrence is computed from this date by index — never chained off the previous one, which is what caused the legacy month-end drift.",
+      cell:(r) => cellInput(r, "anchorDate", "date", v => { r.anchorDate = v; persistCore("recurrences"); scheduleRender(); })},
+    {label:"Yearly raise %", w:"minmax(105px,.7fr)",
+      title:"A raise applied on each anniversary of the anchor date, compounding. Leave blank for none. 3 means 3% a year.",
+      cell:(r) => cellInput(r, "annualRaisePct", "num", (v, i) => {
+        const x = parseFloat(String(v).replace(/[%\s]/g, ""));
+        r.annualRaisePct = Number.isFinite(x) ? Math.max(-50, Math.min(50, x)) : null;
+        i.value = r.annualRaisePct == null ? "" : String(r.annualRaisePct);
+        persistCore("recurrences"); render();
+      }, {placeholder:"\u2014", step:"0.1"})},
+    {label:"Ends", w:"minmax(140px,.95fr)", title:"Leave blank to continue indefinitely (the legacy 'xx').",
+      cell:(r) => cellInput(r, "endDate", "date", v => { r.endDate = v || null; persistCore("recurrences"); scheduleRender(); })},
+    {label:"Weekends", w:"minmax(140px,.95fr)", title:"The legacy file sent BOTH Saturday and Sunday back to Friday, contradicting its own note.",
+      cell:(r) => cellSelect(r, "businessDayPolicy", bizOpts, v => { r.businessDayPolicy = v; persistCore("recurrences"); scheduleRender(); })},
+    {label:"Month end", w:"minmax(140px,.95fr)", title:"What happens when the anchor day doesn't exist in a month — the 31st in February. The anchor day always returns the month after.",
+      cell:(r) => cellSelect(r, "monthEndPolicy", meOpts, v => { r.monthEndPolicy = v; persistCore("recurrences"); scheduleRender(); },
+        {disabled: !(MONTH_STEP[r.frequency] || r.frequency === "EVERY_N_MONTHS")})},
+    {label:"Next 3 occurrences", w:"minmax(200px,1.5fr)", title:"Computed live. A moved date shows the shift.",
+      cell:(r) => {
+        const c = el("div", "gc ro lbl");
+        const occ = occurrences(r, {max:3, from: state.settings ? state.settings.asOfDate : null});
+        if (!occ.length){ c.appendChild(el("span", "occ-none", "no future dates")); return c; }
+        const box = el("div", "occs");
+        for (const o of occ){
+          const chip = el("span", "occ" + (o.moved ? " moved" : ""), shortDate(o.date));
+          if (o.moved) chip.title = "Planned " + shortDate(o.raw) + " (" + ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dow(o.raw)] + "), moved " +
+            Math.abs(o.moved) + " day" + (Math.abs(o.moved) === 1 ? "" : "s") + " " + (o.moved > 0 ? "forward" : "back");
+          box.appendChild(chip);
+        }
+        c.appendChild(box);
+        return c;
+      }},
+    {label:"Per month", w:"minmax(95px,.65fr)", title:"Exact monthly equivalent at today's amount. Reporting only — the simulator uses real dates, and a yearly raise grows this over time.",
+      cell:(r) => {
+        const asOf = (state.settings && state.settings.asOfDate) || todayISO();
+        const now = amountOn(r, asOf);
+        const c = cellReadonly(money0(perMonth(now, r.frequency, r.intervalN)));
+        if (r.annualRaisePct) c.title = "Today " + money(now) + " per occurrence, from a starting " +
+          money(Math.abs(r.amount_c)) + " and " + r.annualRaisePct + "% a year.";
+        return c;
+      }},
+    {label:"", w:"64px", act:true, cell:(r) => cellRowActions(
+      () => {
+        state.recurrences = state.recurrences.filter(x => x.id !== r.id);
+        persistCore("recurrences"); render();
+      },
+      () => {
+        const copy = Object.assign({}, r, {id: uid("r"), name: (r.name || "") + " (copy)"});
+        const at = state.recurrences.indexOf(r);
+        state.recurrences.splice(at < 0 ? state.recurrences.length : at + 1, 0, copy);
+        persistCore("recurrences"); render();
+      },
+      "Duplicate this row — for when the amount changes partway through")}
+  ];
+
+  sec.appendChild(gridTable(cols, rows.map(r => ({item:r})), {
+    emptyText: isIncome ? "No income yet. Add a paycheck — the solver needs paydays to allocate on."
+                        : "No expenses yet.",
+    addLabel: isIncome ? "+ Add income source" : "+ Add expense",
+    onAdd: () => {
+      state.recurrences.push({
+        id: uid("r"), kind: kind, name: "", categoryId: "", accountId: state.accounts[0] ? state.accounts[0].id : "",
+        amount_c: 0, frequency: "MONTHLY", anchorDate: todayISO(), endDate: null,
+        businessDayPolicy: isIncome ? "nearest" : "none", monthEndPolicy: "clamp",
+        intervalN: 1, semiDay2: null, note: ""
+      });
+      persistCore("recurrences"); render();
+    }
+  }));
+  pane.appendChild(sec);
+
+  if (!isIncome) pane.appendChild(categoriesSection());
+  return pane;
+}
+
+function categoriesSection(){
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Categories"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Groups for the budget grid at M4. An earmarked category is a sinking fund: its accumulated balance counts toward the floor the solver may never spend below."));
+
+  const cols = [
+    {label:"Group", w:"minmax(130px,1fr)",
+      cell:(c) => cellInput(c, "group", "text", v => { c.group = v; persistCore("categories"); scheduleRender(); }, {placeholder:"Group"})},
+    {label:"Category", w:"minmax(160px,1.4fr)",
+      cell:(c) => cellInput(c, "name", "text", v => { c.name = v; persistCore("categories"); scheduleRender(); }, {placeholder:"Category name"})},
+    {label:"Earmarked", w:"minmax(150px,.9fr)", title:"Sinking fund — its balance is protected from the solver.",
+      cell:(c) => {
+        const shim = {id:c.id, e: String(!!c.isEarmarked)};
+        return cellSelect(shim, "e", [{value:"false", label:"No"}, {value:"true", label:"Yes — sinking fund"}], v => {
+          c.isEarmarked = (v === "true"); persistCore("categories"); scheduleRender();
+        });
+      }},
+    {label:"Used by", w:"minmax(90px,.6fr)",
+      cell:(c) => cellReadonly(String(state.recurrences.filter(r => r.categoryId === c.id).length))},
+    {label:"", w:"36px", cell:(c) => {
+        const inUse = state.recurrences.some(r => r.categoryId === c.id);
+        return cellDelete(() => {
+          state.categories = state.categories.filter(x => x.id !== c.id);
+          persistCore("categories"); render();
+        }, inUse, inUse ? "In use by a recurring row" : "Delete category");
+      }}
+  ];
+  sec.appendChild(gridTable(cols, state.categories.map(c => ({item:c})), {
+    emptyText: "No categories yet.",
+    addLabel: "+ Add category",
+    onAdd: () => {
+      state.categories.push({id: uid("c"), group: "General", name: "", isEarmarked: false});
+      persistCore("categories"); render();
+    }
+  }));
+  return sec;
+}
+
+function paneGoals(){
+  const d = derive();
+  const pane = el("div");
+
+  const b = el("div", "banner info");
+  const t = el("div", "sp");
+  t.appendChild(el("b", "", "Target date and priority are new. "));
+  t.appendChild(document.createTextNode(
+    "Neither field existed anywhere in your workbooks — surplus just cascaded down the rows in whatever order you last sorted them. " +
+    "Leave a target date blank and the goal is treated as As Soon As Possible."));
+  b.appendChild(t);
+  pane.appendChild(b);
+
+  // --- derived buffer ladder (locked priority) ---
+  const sec0 = el("div", "sec");
+  const h0 = el("div", "sechead");
+  h0.appendChild(el("h2", "", "Savings buffer"));
+  sec0.appendChild(h0);
+  sec0.appendChild(el("p", "lede",
+    "Derived from your expenses and debt minimums, so it moves when they do. The 1-month tier's priority is locked at 0 — " +
+    "the amount is still yours to override." +
+    (bufferAccount()
+      ? " Saved reads the live balance of " + (bufferAccount().name || "your buffer account") + "."
+      : " Mark a savings account “Buffer lives here” on the Accounts tab and this tracks its real balance instead of a typed figure.")));
+
+  const bg = bufferGoals(d);
+  const held = bufferFunded_c();
+  const bAcct = bufferAccount();
+  const bcols = [
+    {label:"Goal", w:"minmax(200px,1.6fr)", cell:(g) => cellReadonly(g.name, "lbl")},
+    {label:"Target", w:"minmax(110px,.8fr)", cell:(g) => cellReadonly(money0(g.targetAmount_c))},
+    {label:"Saved", w:"minmax(105px,.75fr)", cell:(g) => cellReadonly(money0(Math.min(held, g.targetAmount_c)))},
+    {label:"Left to go", w:"minmax(115px,.8fr)", cell:(g) => {
+        const gap = Math.max(0, g.targetAmount_c - held);
+        const c = el("div", "gc ro");
+        c.appendChild(el("span", gap ? "num neg" : "num pos", gap ? money0(gap) : "funded"));
+        return c;
+      }},
+    {label:"Basis", w:"minmax(140px,1fr)", cell:(g) => cellReadonly(g.derivedFrom, "lbl")},
+    {label:"Priority", w:"minmax(110px,.7fr)", cell:(g) => {
+        const c = el("div", "gc ro");
+        c.appendChild(el("span", "tag" + (g.priority === 0 ? " lock" : ""), g.priority === 0 ? "0 · locked" : String(g.priority)));
+        return c;
+      }},
+    {label:"Target date", w:"minmax(120px,.8fr)", cell:() => cellReadonly("ASAP", "lbl")}
+  ];
+  sec0.appendChild(gridTable(bcols, bg.map(g => ({item:g, locked:true})), {}));
+  pane.appendChild(sec0);
+
+  // --- user goals ---
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Financial goals"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Lower priority number wins. Priority beats everything — within a tier, deadlines beat interest beats ASAP order."));
+
+  const kindOpts = [
+    {value:"savings", label:"Savings"},
+    {value:"payoff",  label:"Debt payoff"},
+    {value:"invest",  label:"Investment"}
+  ];
+  const linkOpts = [{value:"", label:"— none —"}].concat(state.accounts.map(a => ({value:a.id, label:a.name || "(unnamed)"})));
+
+  const cols = [
+    {label:"Goal", w:"minmax(170px,1.5fr)",
+      cell:(g) => cellInput(g, "name", "text", v => { g.name = v; persistCore("goals"); scheduleRender(); }, {placeholder:"What you're saving for"})},
+    {label:"Type", w:"minmax(120px,.8fr)",
+      cell:(g) => cellSelect(g, "kind", kindOpts, v => { g.kind = v; persistCore("goals"); })},
+    {label:"Target", w:"minmax(105px,.8fr)",
+      cell:(g) => cellInput(g, "targetAmount_c", "money", (v, i) => {
+        g.targetAmount_c = Math.abs(toCents(v));
+        i.value = g.targetAmount_c ? fromCents(g.targetAmount_c) : "";
+        persistCore("goals"); render();
+      })},
+    {label:"Target date", w:"minmax(145px,1fr)", title:"Blank = As Soon As Possible.",
+      cell:(g) => cellInput(g, "targetDate", "date", (v, i) => {
+        if (v && v < todayISO()){
+          i.value = g.targetDate || "";
+          alert("That date has already passed. Leave it blank for As Soon As Possible.");
+          return;
+        }
+        g.targetDate = v || null; persistCore("goals"); render();
+      })},
+    {label:"Priority", w:"minmax(85px,.5fr)", title:"Lower wins. 1 is the most important.",
+      cell:(g) => cellInput(g, "priority", "num", v => {
+        const n = parseInt(v, 10);
+        g.priority = Number.isFinite(n) ? Math.max(1, Math.min(999, n)) : 500;
+        persistCore("goals"); render();
+      }, {placeholder:"5"})},
+    {label:"Linked account", w:"minmax(140px,1fr)", title:"Where the money lands. Funding is read from this account's balance, so it can't double-count with a transfer you already have.",
+      cell:(g) => cellSelect(g, "linkedAccountId", linkOpts, v => { g.linkedAccountId = v; persistCore("goals"); })},
+    {label:"When", w:"minmax(105px,.7fr)",
+      cell:(g) => {
+        const c = el("div", "gc ro lbl");
+        c.appendChild(el("span", "tag", g.targetDate ? "dated" : "ASAP"));
+        return c;
+      }},
+    {label:"", w:"36px", cell:(g) => cellDelete(() => {
+        state.goals = state.goals.filter(x => x.id !== g.id);
+        persistCore("goals"); render();
+      })}
+  ];
+
+  const sorted = state.goals.slice().sort((a, b2) => (a.priority || 999) - (b2.priority || 999));
+  sec.appendChild(gridTable(cols, sorted.map(g => ({item:g})), {
+    emptyText: "No goals yet. Add one — name, amount, and either a target date or nothing at all for ASAP.",
+    addLabel: "+ Add goal",
+    onAdd: () => {
+      const maxP = state.goals.reduce((m, g) => Math.max(m, g.priority || 0), 0);
+      state.goals.push({
+        id: uid("g"), name: "", targetAmount_c: 0, targetDate: null, priority: Math.min(999, maxP + 1),
+        kind: "savings", linkedAccountId: "", locked: {priority:false, amount:false}, derivedFrom: null
+      });
+      persistCore("goals"); render();
+    }
+  }));
+  pane.appendChild(sec);
+  return pane;
+}
+
+function paneTxns(){
+  const pane = el("div");
+  const strip = pinnedStrip();
+  if (strip) pane.appendChild(strip);
+  const key = state.activeMonth;
+  const list = state.txMonths[key] || [];
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Transactions"));
+  h.appendChild(el("div", "sp"));
+
+  const navBtns = el("div", "tools");
+  navBtns.style.margin = "0";
+  const prev = el("button", "btn sm", "‹ Prev");
+  prev.type = "button";
+  prev.addEventListener("click", async () => {
+    state.activeMonth = shiftMonth(key, -1);
+    await loadMonth(state.activeMonth); render();
+  });
+  const cur = el("span", "savechip", monthLabel(key));
+  cur.style.fontSize = "13px";
+  const next = el("button", "btn sm", "Next ›");
+  next.type = "button";
+  next.addEventListener("click", async () => {
+    state.activeMonth = shiftMonth(key, 1);
+    await loadMonth(state.activeMonth); render();
+  });
+  navBtns.appendChild(prev); navBtns.appendChild(cur); navBtns.appendChild(next);
+  h.appendChild(navBtns);
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "What actually happened. Stored one document per month, so a decade of history never loads at once. " +
+    "At M4 these feed the Actual column; at M5 they move the projection on the same keystroke."));
+
+  const accOpts = [{value:"", label:"— pick an account —"}]
+    .concat(state.accounts.map(a => ({value:a.id, label:a.name || "(unnamed)"})));
+  const catOpts = [{value:"", label:"—"}].concat(state.categories.map(c => ({value:c.id, label:c.group + " · " + c.name})));
+
+  const save = () => { persistMonth(key); render(); };
+
+  const cols = [
+    {label:"Date", w:"minmax(140px,.9fr)",
+      cell:(t) => cellInput(t, "date", "date", v => { t.date = v || todayISO(); save(); })},
+    {label:"Payee", w:"minmax(150px,1.4fr)",
+      cell:(t) => cellInput(t, "payee", "text", v => { t.payee = v; persistMonth(key); }, {placeholder:"Who you paid"})},
+    {label:"Category", w:"minmax(160px,1.2fr)",
+      cell:(t) => cellSelect(t, "categoryId", catOpts, v => { t.categoryId = v; persistMonth(key); })},
+    {label:"Account", w:"minmax(130px,.9fr)",
+      cell:(t) => cellSelect(t, "accountId", accOpts, v => { t.accountId = v; persistMonth(key); })},
+    {label:"Outflow", w:"minmax(105px,.75fr)",
+      cell:(t) => cellInput({id:t.id, o: t.amount_c < 0 ? -t.amount_c : 0}, "o", "money", (v, i) => {
+        const c = Math.abs(toCents(v));
+        if (c){ t.amount_c = -c; } else if (t.amount_c < 0){ t.amount_c = 0; }
+        i.value = c ? fromCents(c) : ""; save();
+      })},
+    {label:"Inflow", w:"minmax(105px,.75fr)",
+      cell:(t) => cellInput({id:t.id, i: t.amount_c > 0 ? t.amount_c : 0}, "i", "money", (v, inp) => {
+        const c = Math.abs(toCents(v));
+        if (c){ t.amount_c = c; } else if (t.amount_c > 0){ t.amount_c = 0; }
+        inp.value = c ? fromCents(c) : ""; save();
+      })},
+    {label:"", w:"36px", cell:(t) => cellDelete(() => {
+        state.txMonths[key] = list.filter(x => x.id !== t.id); save();
+      })}
+  ];
+
+  const sortedTx = list.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  sec.appendChild(gridTable(cols, sortedTx.map(t => ({item:t})), {
+    emptyText: "Nothing recorded for " + monthLabel(key) + " yet.",
+    addLabel: "+ Add transaction",
+    onAdd: () => {
+      state.txMonths[key] = list.concat([{
+        id: uid("t"), date: key + "-" + String(new Date().getDate()).padStart(2, "0"),
+        payee: "", categoryId: "", accountId: state.accounts[0] ? state.accounts[0].id : "",
+        amount_c: 0, memo: "", cleared: false
+      }]);
+      save();
+    }
+  }));
+  pane.appendChild(sec);
+
+  const inflow  = list.reduce((s, t) => s + Math.max(0, t.amount_c), 0);
+  const outflow = list.reduce((s, t) => s + Math.min(0, t.amount_c), 0);
+  const cards = el("div", "cards");
+  const mk = (k, v, s, col) => {
+    const c = el("div", "card");
+    c.appendChild(el("div", "k", k));
+    const vv = el("div", "v", v); if (col) vv.style.color = "var(--" + col + ")";
+    c.appendChild(vv); c.appendChild(el("div", "s", s));
+    return c;
+  };
+  cards.appendChild(mk("Recorded inflow",  money0(inflow),  monthLabel(key), "pos"));
+  cards.appendChild(mk("Recorded outflow", money0(outflow), monthLabel(key), "neg"));
+  cards.appendChild(mk("Net",              money0(inflow + outflow), list.length + " transactions"));
+  pane.appendChild(cards);
+  return pane;
+}
+
+/** Each fix is a declarative patch on one goal row — no closure over solver state. */
+function applyFix(goalId, fix){
+  const g = state.goals.find(x => x.id === goalId);
+  if (!g) return;
+  if (fix.kind === "delayTo")           g.targetDate = fix.date;
+  else if (fix.kind === "clearDate")    g.targetDate = null;
+  else if (fix.kind === "reduceTargetTo") g.targetAmount_c = fix.amount_c;
+  else if (fix.kind === "raisePriority")  g.priority = fix.priority;
+  else return;
+  persistCore("goals");
+  render();
+}
+
+function panePlan(){
+  const pane = el("div");
+  if (!state.accounts.length || !state.recurrences.length){
+    const b = el("div", "banner info");
+    b.appendChild(el("div", "sp", "Add accounts and recurring rows first — the solver needs paydays to allocate on."));
+    pane.appendChild(b); return pane;
+  }
+
+  const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+  const R = solve();
+  const ms = t0 ? ((typeof performance !== "undefined" ? performance.now() : 0) - t0) : 0;
+  const sim = R.sim, base = R.base;
+
+  // ---------- honesty banner ----------
+  const hb = el("div", "banner info");
+  const ht = el("div", "sp");
+  ht.appendChild(el("b", "", "What this is. "));
+  ht.appendChild(document.createTextNode(
+    "The floor is a hard constraint and is asserted on every one of the " + (sim.nDays + 1).toLocaleString() +
+    " days. Dated goals get capacity reserved for them first, earliest deadline first; whatever is left " +
+    "cascades by priority and then by interest rate. Earliest-deadline-first is provably the right order " +
+    "for meeting deadlines on a pot of cash, but paying a debt early also changes future capacity, so the " +
+    "result is a strong heuristic rather than a proven optimum."));
+  hb.appendChild(ht);
+  pane.appendChild(hb);
+
+  if (!sim.breach && sim.lowMargin < 100){
+    const fd = el("div", "banner info");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Every spare dollar is deployed. "));
+    t.appendChild(document.createTextNode(
+      "The projected low touches the floor exactly (" + money(sim.low.v) + " on " + shortDate(sim.low.date) +
+      "), so there is no surplus left sitting idle at any point in the plan."));
+    fd.appendChild(t);
+    pane.appendChild(fd);
+  }
+
+  if (!R.goals.length){
+    const b = el("div", "banner warn");
+    b.appendChild(el("div", "sp", "No open goals, so there is nothing to allocate to. Add one on the Goals tab."));
+    pane.appendChild(b);
+    return pane;
+  }
+
+  // ---------- headline ----------
+  const saved = base.totalInterest - sim.totalInterest;
+  const kpis = el("div", "kpis");
+  const mk = (k, v, s, cls) => {
+    const c = el("div", "kpi");
+    c.appendChild(el("div", "k", k));
+    c.appendChild(el("div", "v" + (cls ? " " + cls : ""), v));
+    c.appendChild(el("div", "s", s));
+    return c;
+  };
+  const deployed = R.plan.reduce((s, p) => s + p.items.reduce((t, i) => t + i.amount_c, 0), 0);
+  kpis.appendChild(mk("Deployed", money0(deployed), "over " + R.plan.length + " paydays", "pos"));
+  kpis.appendChild(mk("Interest saved", money0(saved), "versus minimums only", saved > 0 ? "pos" : ""));
+  kpis.appendChild(mk("Net worth gain", money0(sim.net[sim.nDays] - base.net[base.nDays]),
+    "at " + Math.round(sim.nDays / 365) + " years", "pos"));
+  kpis.appendChild(mk("Cash left idle", money0(sim.accts[sim.opIdx] ? sim.accts[sim.opIdx].bal : 0),
+    "was " + money0(base.accts[base.opIdx] ? base.accts[base.opIdx].bal : 0) + " on minimums"));
+  kpis.appendChild(mk("Floor", sim.breach ? "BREACHED" : "held",
+    sim.breach ? sim.breach.date : money0(sim.low.v) + " low on " + shortDate(sim.low.date),
+    sim.breach ? "neg" : "pos"));
+  pane.appendChild(kpis);
+
+  // ---------- goals ----------
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "When each goal is met"));
+  h.appendChild(el("div", "sp"));
+  const chip = el("span", "savechip", R.iterations + " passes · " + (ms ? ms.toFixed(0) + " ms" : ""));
+  chip.title = R.converged
+    ? "The plan reached a fixed point."
+    : "Fully deployed: a further pass was tried and did not fit under the floor, so the last safe plan stands.";
+  h.appendChild(chip);
+  sec.appendChild(h);
+
+  const gl = el("div", "goallist");
+  const sorted = R.goals.slice().sort((a, b) => {
+    const A = sim.achieved[a.id], B = sim.achieved[b.id];
+    if (A && B) return A.d - B.d;
+    if (A) return -1;
+    if (B) return 1;
+    return a.priority - b.priority;
+  });
+  for (const g of sorted){
+    const a = sim.achieved[g.id];
+    const got = g.funded_c + (sim.funded[g.id] || 0);
+    const row = el("div", "goalrow");
+    row.appendChild(el("span", "pip " + (a ? "ok" : "no"), ""));
+    const mid = el("div", "gmid");
+    const t = el("div", "gtitle");
+    t.appendChild(el("b", "", g.name));
+    if (g.isSweep) t.appendChild(el("span", "tag lock", "everything left over"));
+    else if (g.locked) t.appendChild(el("span", "tag lock", "priority 0 · locked"));
+    else t.appendChild(el("span", "tag", "priority " + g.priority));
+    if (g.unlinked) t.appendChild(el("span", "tag neg", "no account — stays in cash"));
+    if (g.kind === "payoff" && g.apr_bps) t.appendChild(el("span", "tag", (g.apr_bps / 100).toFixed(2) + "% APR"));
+    if (g.targetDate) t.appendChild(el("span", "tag", "wants " + shortDate(g.targetDate)));
+    mid.appendChild(t);
+    if (g.isSweep){
+      mid.appendChild(el("div", "gsub",
+        "Everything left once the goals above are funded goes here" +
+        (g.apr_bps ? ", compounding at " + (g.apr_bps / 100).toFixed(2) + "% a year" : "") +
+        " · reaches " + money0(got)));
+    } else {
+      mid.appendChild(el("div", "gsub", "Target " + money0(g.target_c) +
+        (a ? "" : " · reaches " + money0(got) + " (" + Math.round(100 * got / Math.max(1, g.target_c)) + "%) within the horizon")));
+      const bar = el("div", "bar");
+      const fill = el("div", "barfill");
+      fill.style.width = Math.max(1, Math.min(100, 100 * got / Math.max(1, g.target_c))) + "%";
+      if (!a) fill.style.background = "var(--warn)";
+      bar.appendChild(fill);
+      mid.appendChild(bar);
+    }
+    row.appendChild(mid);
+    const rt = el("div", "gright");
+    if (a){
+      rt.appendChild(el("div", "gdate", shortDate(a.date)));
+      rt.appendChild(el("div", "gnote", "met"));
+    } else {
+      rt.appendChild(el("div", "gdate warnc", "not in " + Math.round(sim.nDays / 365) + " yrs"));
+      rt.appendChild(el("div", "gnote", money0(Math.max(0, g.target_c - got)) + " short"));
+    }
+    row.appendChild(rt);
+    gl.appendChild(row);
+
+    // --- M7: why it misses, and what would fix it ---
+    const rec = (R.infeasible || []).find(x => x.id === g.id);
+    if (rec){
+      const fx = el("div", "fixrowbox");
+      const line = el("div", "fixline");
+      const sev = el("span", "sevtag " + rec.severity, rec.severity === "late"
+        ? rec.daysLate + " days late"
+        : (rec.severity === "impossible" ? "not reachable" : money0(rec.shortfall_c) + " short"));
+      line.appendChild(sev);
+      let txt = "";
+      if (rec.targetDate && rec.projectedDate)
+        txt += "You want " + longDate(rec.targetDate) + "; the plan reaches it " + longDate(rec.projectedDate) + ". ";
+      else if (rec.targetDate)
+        txt += "You want " + longDate(rec.targetDate) + "; it isn't reached within the horizon. ";
+      if (rec.reason) txt += rec.reason.charAt(0).toUpperCase() + rec.reason.slice(1) + ". ";
+      if (rec.blockedBy) txt += "Held up by " + rec.blockedBy.name + " at priority " + rec.blockedBy.priority + ".";
+      line.appendChild(el("span", "fixtext", txt));
+      fx.appendChild(line);
+
+      if (rec.fixes.length){
+        const btns = el("div", "fixbtns");
+        for (const f of rec.fixes.slice(0, 5)){
+          const b = el("button", "btn sm", f.label);
+          b.type = "button";
+          const gid = rec.id;
+          b.addEventListener("click", () => applyFix(gid, f));
+          btns.appendChild(b);
+        }
+        fx.appendChild(btns);
+      }
+      gl.appendChild(fx);
+    }
+  }
+  sec.appendChild(gl);
+  pane.appendChild(sec);
+
+  // ---------- ordering cost ----------
+  const byRate = R.goals.filter(g => !g.locked).slice().sort((a, b) => (b.apr_bps || 0) - (a.apr_bps || 0));
+  const byPri  = R.goals.filter(g => !g.locked).slice().sort((a, b) => a.priority - b.priority);
+  if (byRate.length > 1 && byRate[0].id !== byPri[0].id){
+    const b = el("div", "banner warn");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Your ordering isn't the cheapest. "));
+    t.appendChild(document.createTextNode(
+      "You've put " + byPri[0].name + " first, but " + byRate[0].name + " carries the higher rate (" +
+      (byRate[0].apr_bps / 100).toFixed(2) + "%). The solver obeys you — that's correct — but reordering would cost less interest."));
+    b.appendChild(t);
+    pane.appendChild(b);
+  }
+
+  // ---------- the receipt ----------
+  const sec2 = el("div", "sec");
+  const h2 = el("div", "sechead");
+  h2.appendChild(el("h2", "", "Every allocation"));
+  sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "What to move, on exactly which day, and where. Safe-to-commit on each payday is the lowest " +
+    "projected balance from that day to the end of the horizon, minus the floor — never simply income " +
+    "minus expenses. Your workbook computed this with 1,096 nested SMALL() calls; this is one backward pass."));
+
+  const cols = [
+    {label:"Payday", w:"minmax(130px,.9fr)", cell:(p) => cellReadonly(shortDate(p.date), "lbl")},
+    {label:"Safe to deploy", w:"minmax(130px,.9fr)", cell:(p) => cellReadonly(money(p.total))},
+    {label:"Where it goes", w:"minmax(280px,2.2fr)", cell:(p) => {
+        const c = el("div", "gc ro lbl");
+        const box = el("div", "occs");
+        for (const i of p.items){
+          const chip = el("span", "occ");
+          chip.textContent = i.name + " " + money0(i.amount_c);
+          chip.title = "Brings it to " + money0(i.after) + " of " + money0(i.target);
+          box.appendChild(chip);
+        }
+        if (p.unspent > 0) box.appendChild(el("span", "occ moved", "unassigned " + money0(p.unspent)));
+        c.appendChild(box);
+        return c;
+      }}
+  ];
+  const shown = R.plan.slice(0, 40);
+  sec2.appendChild(gridTable(cols, shown.map(p => ({item:p})), {
+    emptyText:"Nothing to allocate — no surplus above the floor on any payday."}));
+  if (R.plan.length > shown.length){
+    sec2.appendChild(el("p", "lede", "Showing the first " + shown.length + " of " + R.plan.length +
+      " paydays. The remainder follow the same pattern."));
+  }
+  pane.appendChild(sec2);
+  return pane;
+}
+
+/**
+ * The compact dashboard strip, pinned above the budget grid and the transaction list.
+ * The stated purpose of the whole app is a visual reminder every time an expense is
+ * entered — that only works if it is structurally in view while you type, not a
+ * screen you have to go and visit.
+ */
+function pinnedStrip(){
+  if (!state.accounts.length || !state.recurrences.length) return null;
+  let R;
+  try { R = solve(); } catch (e){ return null; }
+  const sim = R.sim;
+  const box = el("div", "pinned" + (sim.breach ? " bad" : ""));
+
+  const spark = el("div", "spark");
+  spark.innerHTML = sparkSVG(sim);
+  box.appendChild(spark);
+
+  const items = el("div", "pitems");
+  const one = (k, v, cls) => {
+    const c = el("div", "pitem");
+    c.appendChild(el("div", "k", k));
+    c.appendChild(el("div", "v" + (cls ? " " + cls : ""), v));
+    return c;
+  };
+  items.appendChild(one("Net worth", money0(sim.net[0])));
+  items.appendChild(one("Lowest cash", money0(sim.low.v) + " · " + shortDate(sim.low.date),
+    sim.lowMargin >= 0 ? "pos" : "neg"));
+  const nextGoal = R.goals
+    .map(g => ({g:g, a:sim.achieved[g.id]}))
+    .filter(x => x.a)
+    .sort((x, y) => x.a.d - y.a.d)[0];
+  items.appendChild(one("Next goal", nextGoal
+    ? nextGoal.g.name + " · " + shortDate(nextGoal.a.date)
+    : "none within horizon"));
+  items.appendChild(one("Floor", sim.breach ? "BREACHED " + shortDate(sim.breach.date) : "held",
+    sim.breach ? "neg" : "pos"));
+  box.appendChild(items);
+
+  const go = el("button", "btn sm ghost", "Open dashboard");
+  go.type = "button";
+  go.addEventListener("click", () => { state.tab = "dashboard"; render(); window.scrollTo({top:0}); });
+  box.appendChild(go);
+  return box;
+}
+
+/** A tiny net-worth sparkline with the floor margin under it. */
+function sparkSVG(sim){
+  const W = 210, H = 46, n = sim.nDays;
+  const arr = sim.net;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of arr){ if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (hi === lo) hi = lo + 1;
+  const x = d => (d / Math.max(1, n)) * (W - 2) + 1;
+  const y = v => H - 3 - ((v - lo) / (hi - lo)) * (H - 8);
+  const stride = Math.max(1, Math.floor(arr.length / 160));
+  let p = "";
+  for (let i = 0; i < arr.length; i += stride) p += (i ? "L" : "M") + x(i).toFixed(1) + " " + y(arr[i]).toFixed(1);
+  p += "L" + x(n).toFixed(1) + " " + y(arr[n]).toFixed(1);
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" class="sparksvg" aria-hidden="true">';
+  s += '<path d="' + p + 'L' + x(n).toFixed(1) + ' ' + H + 'L1 ' + H + 'Z" fill="var(--c-inv-f)" stroke="none"/>';
+  s += '<path d="' + p + '" fill="none" stroke="var(--c-net)" stroke-width="1.8" stroke-linejoin="round"/>';
+  s += '<circle cx="' + x(n).toFixed(1) + '" cy="' + y(arr[n]).toFixed(1) + '" r="2.4" fill="var(--c-net)"/>';
+  s += '</svg>';
+  return s;
+}
+
+/* ---------- going over budget ---------- */
+
+/** A plain scrim + card. Escape and the backdrop both close it. */
+function showModal(build){
+  const scrim = el("div", "scrim");
+  const card = el("div", "modal");
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
+  document.addEventListener("keydown", onKey);
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  build(card, close);
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+  return close;
+}
+
+/** Goal dates under a one-off hit of over_c taken out of this month's spare cash. */
+function planCostOf(over_c, onDate){
+  const keep = state.recurrences;
+  const before = {}, after = {};
+  let R0, R1;
+  try {
+    R0 = solve();
+    for (const g of (R0.goals || [])){
+      const a = R0.sim.achieved[g.id];
+      before[g.id] = {name: g.name, date: a ? a.date : null};
+    }
+    const op = state.accounts.find(a => a.isOperating) || state.accounts[0] || {};
+    state.recurrences = keep.concat([{
+      id: "__overage__", kind: "expense", name: "Overage", categoryId: null,
+      accountId: op.id || null, amount_c: over_c, frequency: "ONETIME", intervalN: 1,
+      anchorDate: onDate, endDate: null, monthEndPolicy: "clamp",
+      businessDayPolicy: "none", note: ""
+    }]);
+    R1 = solve();
+    for (const g of (R1.goals || [])){
+      const a = R1.sim.achieved[g.id];
+      after[g.id] = a ? a.date : null;
+    }
+  } catch (e){
+    state.recurrences = keep;
+    return null;
+  }
+  state.recurrences = keep;
+
+  const slips = [];
+  for (const id of Object.keys(before)){
+    const was = before[id].date, now = after[id];
+    if (was && now){
+      const dd = diffDays(was, now);
+      if (dd > 0) slips.push({name: before[id].name, days: dd, date: now});
+    } else if (was && !now){
+      slips.push({name: before[id].name, days: null, date: null});
+    }
+  }
+  slips.sort((a, b) => (b.days === null ? 1e9 : b.days) - (a.days === null ? 1e9 : a.days));
+  return {slips: slips, lowDelta: R1.sim.low.v - R0.sim.low.v};
+}
+
+/** Envelopes this month with room to give, richest first. Sinking funds are left alone. */
+function donorEnvelopes(mk, exceptId){
+  const M = computeBudget(mk).months[mk];
+  if (!M) return [];
+  const out = [];
+  for (const c of state.categories){
+    if (c.id === exceptId || c.isIncome || c.isEarmarked) continue;
+    const room = Math.min(M.budgeted[c.id] || 0, M.remaining[c.id] || 0);
+    if (room > 0) out.push({id: c.id, name: c.name, room_c: room});
+  }
+  out.sort((a, b) => b.room_c - a.room_c);
+  return out.slice(0, 4);
+}
+
+/**
+ * Going over is a decision, not an accident, so the consequences are shown before
+ * the number sticks. The edit is already committed when this opens; every button
+ * either leaves it, undoes it, or pays for it from somewhere named.
+ */
+function overageDialog(o){
+  showModal((card, close) => {
+    card.appendChild(el("h2", "", "That puts you " + money(o.over_c) + " over"));
+    card.appendChild(el("p", "lede",
+      "You have assigned more than " + o.monthName + " has to give. Here is what each way out costs."));
+
+    const opt = (cls, title, desc) => {
+      const b = el("div", "opt" + (cls ? " " + cls : ""));
+      const h = el("div", "oh");
+      h.appendChild(el("span", "ot", title));
+      b.appendChild(h);
+      if (desc) b.appendChild(el("p", "od", desc));
+      return b;
+    };
+
+    // 1. don't go over
+    const a1 = opt("best", "Put it back", "Return " + o.cat + " to " + money(o.old_c) +
+      ". Nothing else moves and the plan is untouched.");
+    const b1 = el("button", "btn sm primary", "Undo the change");
+    b1.type = "button";
+    b1.addEventListener("click", () => { setBudgeted(o.mk, o.catId, o.old_c); close(); render(); });
+    a1.appendChild(b1);
+    card.appendChild(a1);
+
+    // 2. move it off another envelope
+    const donors = donorEnvelopes(o.mk, o.catId);
+    const a2 = opt("", "Take it from another envelope",
+      donors.length
+        ? "These still have room this month. Moving money across keeps the plan exactly on track."
+        : "Nothing else has room left this month.");
+    if (donors.length){
+      const ul = el("ul");
+      for (const d of donors) ul.appendChild(el("li", "", d.name + " — " + money(d.room_c) + " unspent"));
+      a2.appendChild(ul);
+      for (const d of donors.slice(0, 3)){
+        const take = Math.min(d.room_c, o.over_c);
+        const bd = el("button", "btn sm", "Take " + money(take) + " from " + d.name);
+        bd.type = "button";
+        bd.addEventListener("click", () => {
+          const MM = computeBudget(o.mk).months[o.mk];
+          setBudgeted(o.mk, d.id, ((MM && MM.budgeted[d.id]) || 0) - take);
+          close(); render();
+        });
+        a2.appendChild(bd);
+      }
+    }
+    card.appendChild(a2);
+
+    // 3. let the plan pay for it
+    const a3 = opt("", "Let it come out of the plan",
+      o.planned_c
+        ? "The plan is putting " + money(o.planned_c) + " toward your goals this month. Spending this " +
+          "instead delays them:"
+        : "There is no extra going to goals this month, so this comes straight out of your cushion.");
+    const cost = planCostOf(o.over_c, o.firstDay);
+    if (cost && cost.slips.length){
+      const ul = el("ul");
+      for (const sl of cost.slips.slice(0, 4)){
+        ul.appendChild(el("li", "", sl.days === null
+          ? sl.name + " no longer reached inside the horizon"
+          : sl.name + " slips " + sl.days + " day" + (sl.days === 1 ? "" : "s") + " to " + shortDate(sl.date)));
+      }
+      a3.appendChild(ul);
+    } else if (cost){
+      a3.appendChild(el("p", "od", "No goal date moves — the plan absorbs it."));
+    }
+    const b3 = el("button", "btn sm", "Keep it and accept the delay");
+    b3.type = "button";
+    b3.addEventListener("click", () => { close(); render(); });
+    a3.appendChild(b3);
+    card.appendChild(a3);
+
+    const foot = el("div", "foot");
+    const bc = el("button", "btn sm", "Decide later");
+    bc.type = "button";
+    bc.addEventListener("click", () => { close(); render(); });
+    foot.appendChild(bc);
+    card.appendChild(foot);
+  });
+}
+
+function paneBudget(){
+  const pane = el("div");
+  const strip = pinnedStrip();
+  if (strip) pane.appendChild(strip);
+  const mk = state.budgetMonth;
+  const B = computeBudget(mk);
+  const M = B.months[mk];
+
+  if (!state.categories.length){
+    const b = el("div", "banner info");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "No categories yet. "));
+    t.appendChild(document.createTextNode("Add some on the Expenses tab and the envelope grid appears here."));
+    b.appendChild(t); pane.appendChild(b); return pane;
+  }
+
+  // ---------- header ----------
+  const head = el("div", "sechead");
+  head.appendChild(el("h2", "", "Budget"));
+  head.appendChild(el("div", "sp"));
+  const nav = el("div", "tools");
+  nav.style.margin = "0";
+  const prev = el("button", "btn sm", "‹ Prev");
+  prev.type = "button";
+  prev.addEventListener("click", () => { state.budgetMonth = shiftMonth(mk, -1); render(); });
+  const lbl = el("span", "savechip", monthLabel(mk));
+  lbl.style.fontSize = "13px";
+  const next = el("button", "btn sm", "Next ›");
+  next.type = "button";
+  next.addEventListener("click", () => {
+    state.budgetMonth = shiftMonth(mk, 1);
+    ensureBudgetHorizon();                 // walking forward keeps the window filled
+    render();
+  });
+  nav.appendChild(prev); nav.appendChild(lbl); nav.appendChild(next);
+  head.appendChild(nav);
+  pane.appendChild(head);
+
+  // how far ahead is already planned
+  const cur = monthKey((state.settings && state.settings.asOfDate) || todayISO());
+  let ready = 0, probe = cur;
+  while (ready < 36){
+    const b = state.budgetMonths[probe] && state.budgetMonths[probe].budgeted;
+    if (!b || !Object.keys(b).length) break;
+    ready++; probe = shiftMonth(probe, 1);
+  }
+  if (ready > 1){
+    const ah = el("p", "lede");
+    ah.style.marginBottom = "12px";
+    ah.textContent = ready + " months are planned ahead, through " +
+      monthLabel(shiftMonth(cur, ready - 1)) +
+      ". Each new month starts as a copy of the one before it — change anything and it stays changed.";
+    pane.appendChild(ah);
+  }
+
+  const startM = state.settings && state.settings.budgetStartMonth;
+  if (startM && mk < startM){
+    const b = el("div", "banner info");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "History. "));
+    t.appendChild(document.createTextNode(
+      "Your plan starts in " + monthLabel(startM) + ". These figures are kept exactly as you entered them, " +
+      "but nothing here carries forward and none of it affects the projection."));
+    b.appendChild(t);
+    const go = el("button", "btn sm", "Go to " + monthLabel(startM));
+    go.type = "button";
+    go.addEventListener("click", () => { state.budgetMonth = startM; render(); });
+    b.appendChild(go);
+    pane.appendChild(b);
+  }
+
+  // ---------- income, at the top, where you enter what actually arrived ----------
+  const irows = incomeRowsFor(mk);
+  const extras = extraIncomeFor(mk);
+  const other = (state.txMonths[mk] || []).filter(t =>
+    t.amount_c > 0 && !irows.some(r => r.id === t.id) &&
+    String(t.id).indexOf(EXTRA_PREFIX) !== 0 &&
+    (!t.categoryId || isIncomeCategory(state.categories.find(c => c.id === t.categoryId))));
+  const otherTotal = other.reduce((s, t) => s + t.amount_c, 0);
+
+  const isec = el("div", "sec");
+  const ih = el("div", "sechead");
+  ih.appendChild(el("h2", "", "Income"));
+  isec.appendChild(ih);
+  isec.appendChild(el("p", "lede",
+    "What you expect this month, and what has actually landed. Expected starts from your recurring income " +
+    "rows — type over it for a month that is different, and only that payday changes. Type the real figure " +
+    "into Received once it lands. Neither is an envelope, so neither ever spends anything. " +
+    "Money that no recurring row predicts — a tax refund, a bonus — goes in Additional income underneath."));
+
+  const ITPL = "minmax(180px,1.6fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr) minmax(120px,.9fr)";
+  const iwrap = el("div", "gridwrap");
+  const igrid = el("div", "grid");
+  const ihr = el("div", "grow head");
+  ihr.style.gridTemplateColumns = ITPL;
+  for (const [lbl, tip] of [["Source",""],["Due",""],["Expected","What this payday is expected to bring. Starts from your recurring income row — type over it for a month that is different, and the change applies to that payday alone."],
+        ["Received","What actually arrived. Type it here."],["Still due",""]]){
+    const c = el("div", "gc");
+    c.appendChild(el("span", "", lbl));
+    if (tip) c.title = tip;
+    ihr.appendChild(c);
+  }
+  igrid.appendChild(ihr);
+
+  const ILAB = ["Source", "Due", "Expected", "Received", "Still due"];
+  const stack = (row) => {
+    Array.prototype.forEach.call(row.children, (c, i) => {
+      if (ILAB[i]) c.setAttribute("data-label", ILAB[i]);
+    });
+    return row;
+  };
+  let plannedTot = 0, gotTot = 0;
+  for (const r of irows){
+    plannedTot += r.planned_c; gotTot += r.received_c;
+    const row = el("div", "grow");
+    row.style.gridTemplateColumns = ITPL;
+    const nameCell = el("div", "gc ro lbl");
+    nameCell.appendChild(el("span", "", r.name));
+    if (r.overridden){
+      const t = el("span", "tag");
+      t.textContent = "edited";
+      t.title = "Standing amount " + money(r.standing_c) + ". Click to put it back.";
+      t.style.cursor = "pointer";
+      t.addEventListener("click", () => { setIncomeOverride(mk, r.recId, r.occDate, null); render(); });
+      nameCell.appendChild(t);
+    }
+    row.appendChild(nameCell);
+    row.appendChild(cellReadonly(shortDate(r.occDate)));
+    row.appendChild(cellInput({id:"exp-" + r.id, v: r.planned_c}, "v", "money",
+      (val) => {
+        const c = Math.abs(toCents(val));
+        // typing the standing figure back is a revert, not an override to remember
+        setIncomeOverride(mk, r.recId, r.occDate, c === r.standing_c ? null : c);
+        render();
+      }));
+    row.appendChild(cellInput({id:"inc-" + r.id, v: r.received_c}, "v", "money",
+      (val) => { setIncomeReceived(mk, r, Math.abs(toCents(val))); render(); }));
+    const still = Math.max(0, r.planned_c - r.received_c);
+    const sc = el("div", "gc ro");
+    sc.appendChild(el("span", "num " + (still ? "" : "pos"), still ? money(still) : "in"));
+    row.appendChild(sc);
+    igrid.appendChild(stack(row));
+  }
+  let extraTot = 0;
+  if (extras.length){
+    const eh = el("div", "grow grouphead");
+    eh.style.gridTemplateColumns = ITPL;
+    const en = el("div", "gc ro lbl");
+    en.appendChild(el("b", "", "Additional income"));
+    eh.appendChild(en);
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    eh.appendChild(cellReadonly(""));
+    igrid.appendChild(eh);
+  }
+  for (const t of extras){
+    extraTot += t.amount_c;
+    const row = el("div", "grow");
+    row.style.gridTemplateColumns = ITPL;
+    row.appendChild(cellInput({id:"xn-" + t.id, v: t.payee || ""}, "v", "text",
+      (val) => { updateExtraIncome(mk, t.id, {payee: val}); scheduleRender(); },
+      {placeholder:"Tax refund, bonus \u2026"}));
+    row.appendChild(cellInput({id:"xd-" + t.id, v: t.date}, "v", "date",
+      (val) => { updateExtraIncome(mk, t.id, {date: val || (mk + "-01")}); scheduleRender(); }));
+    row.appendChild(cellReadonly("one-off"));
+    row.appendChild(cellInput({id:"xa-" + t.id, v: t.amount_c}, "v", "money",
+      (val) => { updateExtraIncome(mk, t.id, {amount_c: Math.abs(toCents(val))}); render(); }));
+    const xc = el("div", "gc act");
+    const xb = el("button", "xbtn", "\u00d7");
+    xb.type = "button";
+    xb.title = "Remove this one-off";
+    xb.addEventListener("click", () => { removeExtraIncome(mk, t.id); render(); });
+    xc.appendChild(xb);
+    row.appendChild(xc);
+    igrid.appendChild(stack(row));
+  }
+  gotTot += extraTot;
+  if (otherTotal){
+    const row = el("div", "grow");
+    row.style.gridTemplateColumns = ITPL;
+    row.appendChild(cellReadonly("Other income", "lbl"));
+    row.appendChild(cellReadonly(String(other.length) + " row" + (other.length === 1 ? "" : "s"), "lbl"));
+    row.appendChild(cellReadonly("—"));
+    row.appendChild(cellReadonly(money(otherTotal)));
+    row.appendChild(cellReadonly("in"));
+    igrid.appendChild(row);
+    gotTot += otherTotal;
+  }
+  if (!irows.length && !otherTotal && !extras.length){
+    igrid.appendChild(el("div", "empty",
+      "No income rows for " + monthLabel(mk) + ". Add your paychecks on the Income tab and they appear here."));
+  } else {
+    const tot = el("div", "grow grouphead");
+    tot.style.gridTemplateColumns = ITPL;
+    const tn = el("div", "gc ro lbl");
+    tn.appendChild(el("b", "", "Total"));
+    tot.appendChild(tn);
+    tot.appendChild(cellReadonly(""));
+    tot.appendChild(cellReadonly(money(plannedTot)));
+    tot.appendChild(cellReadonly(money(gotTot)));
+    tot.appendChild(cellReadonly(money(Math.max(0, plannedTot - gotTot))));
+    igrid.appendChild(tot);
+  }
+  iwrap.appendChild(igrid);
+  const ibar = el("div", "addbar");
+  const iadd = el("button", "btn sm", "+ Add one-off income");
+  iadd.type = "button";
+  iadd.title = "A tax refund, a bonus, a rebate \u2014 money this month that no recurring row predicts.";
+  iadd.addEventListener("click", () => { addExtraIncome(mk); render(); });
+  ibar.appendChild(iadd);
+  iwrap.appendChild(ibar);
+  isec.appendChild(iwrap);
+  pane.appendChild(isec);
+
+  // ---------- to be budgeted ----------
+  // ---------- the plan's own claim on this month ----------
+  // The solver commits real money on real paydays. Leaving it off the grid would
+  // show cash as free to budget when it is already promised to a goal.
+  let planned_c = 0, planRows = [];
+  try {
+    const R = solve();
+    for (const p of (R.plan || [])){
+      if (monthKey(p.date) !== mk) continue;
+      for (const it of p.items){
+        planned_c += it.amount_c;
+        planRows.push({date:p.date, name:it.name, amount_c:it.amount_c});
+      }
+    }
+  } catch (e){ planned_c = 0; }
+
+  const freeTbb = M.tbb - planned_c;
+  const top = el("div", "tbb" + (freeTbb < 0 ? " over" : (freeTbb === 0 ? " zero" : "")));
+  const l = el("div", "tbbl");
+  l.appendChild(el("div", "k", "Left to be budgeted"));
+  l.appendChild(el("div", "v num", money(freeTbb)));
+  const msg = freeTbb < 0
+    ? "You've assigned " + money(-freeTbb) + " more than you have."
+    : (freeTbb === 0 ? "Every dollar has a job."
+       : (planned_c ? "Still unassigned, after " + money(planned_c) + " promised to the plan." : "Still unassigned."));
+  l.appendChild(el("div", "s", msg));
+
+  // Every figure that made this number, named. An envelope that is quietly not
+  // counted is otherwise invisible: the row shows, the money looks assigned, and
+  // the total simply disagrees with no way to see why.
+  const why = el("details", "tbbwhy");
+  const sum = el("summary", "", "How this is worked out");
+  why.appendChild(sum);
+  const tbl = el("div", "whygrid");
+  const line = (label, amount_c, note, cls) => {
+    tbl.appendChild(el("div", "wl" + (cls ? " " + cls : ""), label));
+    tbl.appendChild(el("div", "wv num" + (cls ? " " + cls : ""), money(amount_c)));
+    tbl.appendChild(el("div", "wn", note || ""));
+  };
+  const openingTbb = M.tbb - M.income + M.budgetedTotal;
+  line("Carried in", openingTbb,
+       mk === (state.settings && state.settings.budgetStartMonth)
+         ? "your starting figure" : "left over from " + monthLabel(shiftMonth(mk, -1)));
+  line("Income this month", M.income,
+       M.received > 0 && M.expected > 0
+         ? money(M.received) + " received, " + money(M.expected) + " still expected"
+         : (M.expected > 0 ? "all still expected" : "all received"));
+
+  // each group's share, so a missing one stands out
+  const incomeSet0 = incomeCategoryIds();
+  const byGroup = {};
+  for (const c of state.categories){
+    if (isIncomeCategory(c, incomeSet0)) continue;
+    const g = c.group || "Other";
+    byGroup[g] = (byGroup[g] || 0) + (M.budgeted[c.id] || 0);
+  }
+  line("Budgeted to envelopes", -M.budgetedTotal, Object.keys(byGroup).length + " groups", "neg");
+  for (const g of Object.keys(byGroup).sort()){
+    if (!byGroup[g]) continue;
+    line("\u2003" + g, -byGroup[g], "", "sub");
+  }
+  if (planned_c) line("Promised to the plan", -planned_c, "extra toward your goals", "neg");
+  line("Left to be budgeted", freeTbb, "", "tot");
+
+  // Anything deliberately kept out of the envelope maths is stated, not hidden.
+  const skipped = state.categories.filter(c => isIncomeCategory(c, incomeSet0));
+  if (skipped.length){
+    const nte = el("p", "whynote");
+    nte.textContent = "Not an envelope, so never counted here: " +
+      skipped.map(c => c.name).join(", ") +
+      ". A category counts as income when an income row posts to it, or when its group is called Income. " +
+      "If something you budget to is listed here, move it out of the Income group or point that income row " +
+      "at a different category.";
+    why.appendChild(tbl);
+    why.appendChild(nte);
+  } else {
+    why.appendChild(tbl);
+  }
+  l.appendChild(why);
+  top.appendChild(l);
+
+  const r = el("div", "tbbr");
+  const stat = (k, v, s) => {
+    const c = el("div", "tbbstat");
+    c.appendChild(el("div", "k", k));
+    c.appendChild(el("div", "v num", v));
+    if (s) c.appendChild(el("div", "s", s));
+    return c;
+  };
+  r.appendChild(stat("Income this month", money(M.income),
+    M.expected > 0
+      ? (M.received > 0 ? money(M.received) + " in, " + money(M.expected) + " still due"
+                        : money(M.expected) + " expected, none in yet")
+      : (M.received > 0 ? "all received" : "nothing recorded")));
+  r.appendChild(stat("Budgeted", money(M.budgetedTotal), state.categories.length + " categories"));
+  r.appendChild(stat("Spent", money(-M.activityTotal), "actual"));
+  r.appendChild(stat("Remaining", money(M.remainingTotal), "carried forward"));
+  if (planned_c) r.appendChild(stat("To the plan", money(planned_c), "extra toward goals"));
+  top.appendChild(r);
+  pane.appendChild(top);
+
+  // ---------- quick actions ----------
+  const tools = el("div", "tools");
+  const underfunded = el("button", "btn sm", "Fund to plan");
+  underfunded.type = "button";
+  underfunded.title = "Set every category's budget to its recurring plan for this month";
+  underfunded.addEventListener("click", () => {
+    for (const c of state.categories.filter(x => !isIncomeCategory(x))){
+      const plan = state.recurrences
+        .filter(x => x.kind === "expense" && x.categoryId === c.id)
+        .reduce((s, x) => s + perMonth(Math.abs(x.amount_c), x.frequency, x.intervalN), 0);
+      if (plan) setBudgeted(mk, c.id, plan);
+    }
+    render();
+  });
+  tools.appendChild(underfunded);
+
+  const copyLast = el("button", "btn sm", "Copy last month");
+  copyLast.type = "button";
+  copyLast.addEventListener("click", () => {
+    const p = (state.budgetMonths[shiftMonth(mk, -1)] || {}).budgeted || {};
+    for (const c of state.categories) setBudgeted(mk, c.id, p[c.id] || 0);
+    render();
+  });
+  tools.appendChild(copyLast);
+
+  const clear = el("button", "btn sm ghost", "Clear month");
+  clear.type = "button";
+  clear.addEventListener("click", () => {
+    if (!confirm("Clear every budgeted amount for " + monthLabel(mk) + "?")) return;
+    for (const c of state.categories) setBudgeted(mk, c.id, 0);
+    render();
+  });
+  tools.appendChild(clear);
+  pane.appendChild(tools);
+
+  // ---------- the grid ----------
+  // Income categories are deliberately absent: they are not envelopes to spend from.
+  const incomeSet = incomeCategoryIds();
+  const groups = [];
+  for (const c of state.categories){
+    if (isIncomeCategory(c, incomeSet)) continue;
+    let g = groups.find(x => x.name === (c.group || "Other"));
+    if (!g){ g = {name:c.group || "Other", cats:[]}; groups.push(g); }
+    g.cats.push(c);
+  }
+
+  const wrap = el("div", "gridwrap");
+  const grid = el("div", "grid");
+  const TPL = "minmax(180px,1.6fr) minmax(112px,.9fr) minmax(112px,.9fr) minmax(112px,.9fr) minmax(112px,.9fr)";
+
+  const hr = el("div", "grow head");
+  hr.style.gridTemplateColumns = TPL;
+  for (const [label, tip] of [["Category",""],["Carried in","Last month's Remaining"],
+        ["Budgeted","What you assign. May go negative to move money out of an envelope. Accepts a sum: 200+50."],
+        ["Actual","What you actually spent. Typing here writes one reconciling transaction. Accepts a sum, so several receipts can go in at once: 12.50+8.75+30."],
+        ["Remaining","Carried in + Budgeted − Actual. Carries into next month."]]){
+    const h = el("div", "gc");
+    h.appendChild(el("span", "", label));
+    if (tip) h.title = tip;
+    hr.appendChild(h);
+  }
+  grid.appendChild(hr);
+
+  for (const g of groups){
+    let gb = 0, ga = 0, gr = 0, gc = 0;
+    for (const c of g.cats){ gb += M.budgeted[c.id] || 0; ga += M.activity[c.id] || 0; gr += M.remaining[c.id] || 0; gc += M.carryIn[c.id] || 0; }
+    const gh = el("div", "grow grouphead");
+    gh.style.gridTemplateColumns = TPL;
+    const gn = el("div", "gc ro lbl");
+    gn.appendChild(el("b", "", g.name));
+    gh.appendChild(gn);
+    gh.appendChild(cellReadonly(money(gc)));
+    gh.appendChild(cellReadonly(money(gb)));
+    gh.appendChild(cellReadonly(money(-ga)));
+    gh.appendChild(cellReadonly(money(gr)));
+    grid.appendChild(gh);
+
+    for (const c of g.cats){
+      const row = el("div", "grow");
+      row.style.gridTemplateColumns = TPL;
+
+      const nameCell = el("div", "gc ro lbl");
+      nameCell.appendChild(el("span", "", c.name));
+      if (c.isEarmarked){
+        const t = el("span", "tag");
+        t.textContent = "sinking";
+        t.title = "A sinking fund — its accumulated balance is protected from the solver.";
+        nameCell.appendChild(t);
+      }
+      row.appendChild(nameCell);
+
+      row.appendChild(cellReadonly(money(M.carryIn[c.id] || 0)));
+
+      row.appendChild(cellInput({id:"b-" + mk + "-" + c.id, v: M.budgeted[c.id] || 0}, "v", "money",
+        (val) => {
+          // a leading minus is meaningful here: it moves money OUT of this envelope
+          const raw = String(val).trim();
+          const neg = /^-/.test(raw);
+          const cents = Math.abs(toCents(raw)) * (neg ? -1 : 1);
+          const was = M.budgeted[c.id] || 0;
+          setBudgeted(mk, c.id, cents);
+          // Only when this edit is what pushes it over — not on every keystroke in an
+          // already-negative month, which would be unusable.
+          const after = freeTbb - (cents - was);
+          if (cents > was && after < 0 && freeTbb >= 0){
+            overageDialog({mk: mk, catId: c.id, cat: c.name, old_c: was, new_c: cents,
+                           over_c: -after, planned_c: planned_c,
+                           monthName: monthLabel(mk), firstDay: mk + "-01"});
+            return;
+          }
+          scheduleRender();
+        }, {signed:true}));
+
+      row.appendChild(cellInput({id:"a-" + mk + "-" + c.id, v: -(M.activity[c.id] || 0)}, "v", "money",
+        (val) => { setActual(mk, c.id, Math.abs(toCents(val))); scheduleRender(); }));
+
+      const rem = M.remaining[c.id] || 0;
+      const rc = el("div", "gc ro");
+      rc.appendChild(el("span", "num " + (rem < 0 ? "neg" : (rem > 0 ? "pos" : "")), money(rem)));
+      row.appendChild(rc);
+
+      const BLAB = ["Category", "Carried in", "Budgeted", "Actual", "Remaining"];
+      Array.prototype.forEach.call(row.children, (cell, i) => {
+        if (BLAB[i]) cell.setAttribute("data-label", BLAB[i]);
+      });
+      grid.appendChild(row);
+    }
+  }
+  if (planned_c > 0){
+    const gh = el("div", "grow grouphead");
+    gh.style.gridTemplateColumns = TPL;
+    const gn = el("div", "gc ro lbl");
+    gn.appendChild(el("b", "", "The plan"));
+    gh.appendChild(gn);
+    gh.appendChild(cellReadonly(""));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    gh.appendChild(cellReadonly(money(0)));
+    gh.appendChild(cellReadonly(money(planned_c)));
+    grid.appendChild(gh);
+
+    const row = el("div", "grow locked");
+    row.style.gridTemplateColumns = TPL;
+    const nameCell = el("div", "gc ro lbl");
+    nameCell.appendChild(el("span", "", "Extra toward goals"));
+    const t = el("span", "tag lock", "from the plan");
+    t.title = planRows.map(r => shortDate(r.date) + " · " + r.name + " " + money(r.amount_c)).join("\n");
+    nameCell.appendChild(t);
+    row.appendChild(nameCell);
+    row.appendChild(cellReadonly(money(0)));
+    row.appendChild(cellReadonly(money(planned_c)));
+    row.appendChild(cellReadonly(money(0)));
+    const rc = el("div", "gc ro");
+    rc.appendChild(el("span", "num pos", money(planned_c)));
+    row.appendChild(rc);
+    const BL = ["Category", "Carried in", "Budgeted", "Actual", "Remaining"];
+    Array.prototype.forEach.call(row.children, (c, i) => { if (BL[i]) c.setAttribute("data-label", BL[i]); });
+    grid.appendChild(row);
+  }
+
+  wrap.appendChild(grid);
+  pane.appendChild(wrap);
+
+  // ---------- the invariant ----------
+  const cashNow = budgetParticipatingCash();
+  const lhs = M.remainingTotal + M.tbb;
+  const delta = lhs - cashNow;
+  const inv = el("div", "banner " + (Math.abs(delta) < 100 ? "info" : "warn"));
+  const it = el("div", "sp");
+  if (Math.abs(delta) < 100){
+    it.appendChild(el("b", "", "Envelopes reconcile. "));
+    it.appendChild(document.createTextNode(
+      "Remaining " + money(M.remainingTotal) + " + to-be-budgeted " + money(M.tbb) + " = " + money(cashNow) + " of budgeted cash."));
+  } else {
+    it.appendChild(el("b", "", "Off by " + money(Math.abs(delta)) + ". "));
+    it.appendChild(document.createTextNode(
+      "Envelopes plus to-be-budgeted come to " + money(lhs) + ", but your budgeted cash accounts hold " +
+      money(cashNow) + ". Usually the opening seed needs setting."));
+    const fix = el("button", "btn sm", "Reconcile");
+    fix.type = "button";
+    fix.title = "Adjust the opening to-be-budgeted seed so the two sides agree";
+    fix.addEventListener("click", () => {
+      const s = state.settings;
+      s.openingTBB_c = (s.openingTBB_c != null ? s.openingTBB_c : budgetParticipatingCash()) - delta;
+      persistCore("settings"); render();
+    });
+    inv.appendChild(it); inv.appendChild(fix);
+    pane.appendChild(inv);
+    return pane;
+  }
+  inv.appendChild(it);
+  pane.appendChild(inv);
+  return pane;
+}
+
+function paneSchedule(){
+  const pane = el("div");
+  const recs = state.recurrences.filter(r => r.anchorDate);
+
+  // ---------- 1. what the legacy engine would have done ----------
+  const N = 8;
+  const diffs = recs.map(r => {
+    const mine = occurrences(r, {max:N});
+    const old  = legacyOccurrences(r, N);
+    let changed = 0;
+    const pairs = [];
+    for (let i = 0; i < Math.max(mine.length, old.length); i++){
+      const a = mine[i] ? mine[i].date : null;
+      const b = old[i]  ? old[i].date  : null;
+      if (a !== b) changed++;
+      pairs.push({mine:a, old:b, delta: (a && b) ? diffDays(b, a) : null});
+    }
+    return {rec:r, pairs:pairs, changed:changed, mine:mine};
+  });
+  const affected = diffs.filter(d => d.changed > 0);
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "What changes, and why"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Your workbook generated dates by chaining each occurrence off the previous one. This engine computes " +
+    "the nth occurrence from the anchor directly, so an error can never propagate. Here is every date that " +
+    "moves as a result, for the next " + N + " occurrences of each row."));
+
+  const b = el("div", "banner " + (affected.length ? "warn" : "info"));
+  const bt = el("div", "sp");
+  if (affected.length){
+    bt.appendChild(el("b", "", affected.length + " of your " + recs.length + " rows produce different dates. "));
+    bt.appendChild(document.createTextNode("Each one is explained below. Nothing here changes your data — it's a comparison."));
+  } else {
+    bt.appendChild(el("b", "", "None of your current rows are affected. "));
+    bt.appendChild(document.createTextNode("Their frequencies and dates avoid every case where the two engines disagree."));
+  }
+  b.appendChild(bt);
+  sec.appendChild(b);
+
+  for (const d of diffs){
+    if (!d.changed) continue;
+    const card = el("div", "diffcard");
+    const head = el("div", "diffhead");
+    head.appendChild(el("b", "", d.rec.name || "(unnamed)"));
+    head.appendChild(el("span", "tag", FREQ[d.rec.frequency] ? FREQ[d.rec.frequency].label : d.rec.frequency));
+    head.appendChild(el("span", "tag neg", d.changed + " of " + d.pairs.length + " dates move"));
+    card.appendChild(head);
+
+    const why = explainDiff(d);
+    if (why) card.appendChild(el("div", "diffwhy", why));
+
+    const tbl = el("div", "difftbl");
+    const rowA = el("div", "diffrow");
+    rowA.appendChild(el("div", "difflbl", "This app"));
+    const rowB = el("div", "diffrow");
+    rowB.appendChild(el("div", "difflbl old", "Your workbook"));
+    for (const p of d.pairs){
+      const ca = el("div", "diffcell" + (p.mine !== p.old ? " hit" : ""), p.mine ? shortDate(p.mine) : "—");
+      rowA.appendChild(ca);
+      const cb = el("div", "diffcell old" + (p.mine !== p.old ? " hit" : ""), p.old ? shortDate(p.old) : "—");
+      if (p.delta != null && p.delta !== 0){
+        cb.title = Math.abs(p.delta) + " day" + (Math.abs(p.delta) === 1 ? "" : "s") +
+                   (p.delta > 0 ? " later" : " earlier") + " in this app";
+      }
+      rowB.appendChild(cb);
+    }
+    tbl.appendChild(rowA); tbl.appendChild(rowB);
+    card.appendChild(tbl);
+    sec.appendChild(card);
+  }
+  pane.appendChild(sec);
+
+  // ---------- 2. the upcoming calendar ----------
+  const sec2 = el("div", "sec");
+  const h2 = el("div", "sechead");
+  h2.appendChild(el("h2", "", "Next 60 days"));
+  sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "Every occurrence the engine generates between today and 60 days out. Paydays are marked — " +
+    "the solver will use exactly these as its allocation dates."));
+
+  const from = state.settings ? state.settings.asOfDate : todayISO();
+  const until = addDays(from, 60);
+  const events = [];
+  for (const r of recs){
+    for (const o of occurrences(r, {max:40, from:from, until:until})){
+      events.push({date:o.date, raw:o.raw, moved:o.moved, rec:r});
+    }
+  }
+  events.sort((a, b) => a.date.localeCompare(b.date) || a.rec.name.localeCompare(b.rec.name));
+
+  if (!events.length){
+    sec2.appendChild(el("div", "empty", "No occurrences in the next 60 days."));
+  } else {
+    const cal = el("div", "cal");
+    let lastDate = null;
+    let running = 0;
+    for (const e of events){
+      if (e.date !== lastDate){
+        lastDate = e.date;
+        const dh = el("div", "calday");
+        dh.appendChild(el("span", "caldate", shortDate(e.date)));
+        dh.appendChild(el("span", "caldow", ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][dow(e.date)]));
+        cal.appendChild(dh);
+      }
+      const isInc = e.rec.kind === "income";
+      const amt = amountOn(e.rec, e.date);
+      running += isInc ? amt : -amt;
+      const row = el("div", "calrow" + (isInc ? " inc" : ""));
+      row.appendChild(el("span", "calname", e.rec.name || "(unnamed)"));
+      if (e.moved){
+        const m = el("span", "tag", "moved " + (e.moved > 0 ? "+" : "") + e.moved + "d");
+        m.title = "Planned " + shortDate(e.raw) + ", a " + ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][dow(e.raw)];
+        row.appendChild(m);
+      }
+      const v = el("span", "calamt " + (isInc ? "pos" : "neg"), (isInc ? "+" : "−") + money(amt).replace("-", ""));
+      row.appendChild(v);
+      cal.appendChild(row);
+    }
+    sec2.appendChild(cal);
+    const net = el("div", "calfoot");
+    net.appendChild(el("span", "", "Net over 60 days"));
+    net.appendChild(el("span", "num " + (running >= 0 ? "pos" : "neg"), money(running, {sign:true})));
+    sec2.appendChild(net);
+  }
+  pane.appendChild(sec2);
+
+  // ---------- 3. the fixture panel ----------
+  const sec3 = el("div", "sec");
+  const h3 = el("div", "sechead");
+  h3.appendChild(el("h2", "", "Engine checks"));
+  sec3.appendChild(h3);
+
+  const T = runFixtures();
+  const fails = T.filter(x => !x.ok);
+  sec3.appendChild(el("p", "lede",
+    "These run in your browser every time this page opens. Cases marked LEGACY assert what the old workbook " +
+    "did, so the comparison above is checked too, not just asserted."));
+
+  const sb = el("div", "banner " + (fails.length ? "warn" : "info"));
+  const sbt = el("div", "sp");
+  sbt.appendChild(el("b", "", fails.length ? (fails.length + " of " + T.length + " checks FAILING. ")
+                                           : ("All " + T.length + " checks passing. ")));
+  sbt.appendChild(document.createTextNode(fails.length
+    ? "Something in the date engine is wrong — tell me which ones."
+    : "Month-end returns, leap years, weekend direction, holidays, semi-monthly anchors and unit conversions."));
+  sb.appendChild(sbt);
+  sec3.appendChild(sb);
+
+  const groups = [];
+  for (const x of T){
+    let g = groups.find(q => q.name === x.group);
+    if (!g){ g = {name:x.group, items:[]}; groups.push(g); }
+    g.items.push(x);
+  }
+  for (const g of groups){
+    const gb = el("div", "fixgroup");
+    const gh = el("div", "fixhead");
+    gh.appendChild(el("b", "", g.name));
+    const nfail = g.items.filter(i => !i.ok).length;
+    gh.appendChild(el("span", "tag" + (nfail ? " neg" : ""), nfail ? nfail + " failing" : g.items.length + " ok"));
+    gb.appendChild(gh);
+    for (const i of g.items){
+      const row = el("div", "fixrow" + (i.ok ? "" : " bad"));
+      row.appendChild(el("span", "fixpip", i.ok ? "✓" : "×"));
+      const txt = el("div", "fixtxt");
+      txt.appendChild(el("span", "fixname", i.name));
+      if (i.note) txt.appendChild(el("span", "fixnote", i.note));
+      if (!i.ok){
+        txt.appendChild(el("span", "fixnote", "got " + i.got));
+        txt.appendChild(el("span", "fixnote", "want " + i.want));
+      }
+      row.appendChild(txt);
+      gb.appendChild(row);
+    }
+    sec3.appendChild(gb);
+  }
+  pane.appendChild(sec3);
+  return pane;
+}
+
+/** Name the specific legacy defect a row runs into, rather than just showing a delta. */
+function explainDiff(d){
+  const r = d.rec, f = r.frequency;
+  const out = [];
+  if (f === "SEMIMONTHLY"){
+    out.push("Semi-monthly in the workbook was simply “+15 days”, so it drifted off the calendar and only " +
+             "settled into a real twice-a-month rhythm after 13 occurrences. Here it has two fixed anchor days.");
+  }
+  if ((MONTH_STEP[f] || f === "EVERY_N_MONTHS") && ymd(r.anchorDate).d > 28){
+    out.push("The anchor is the " + ymd(r.anchorDate).d + "th. In the workbook, a month without that day overflowed " +
+             "into the next month and every later date inherited the new day permanently. Here it clamps for that " +
+             "month only, then returns to the " + ymd(r.anchorDate).d + "th.");
+  }
+  if (r.businessDayPolicy && r.businessDayPolicy !== "none"){
+    const sundays = d.mine.filter(o => dow(o.raw) === 0).length;
+    if (sundays) out.push("Sunday occurrences move forward to Monday. The workbook moved them back to Friday — " +
+                          "a three-day error, contradicting its own note on the Income sheet.");
+  }
+  if (!MONTH_STEP[f] && !DAY_STEP[f] && f !== "SEMIMONTHLY" && f !== "ONETIME"){
+    out.push("The workbook had no step rule for " + (FREQ[f] ? FREQ[f].label : f) +
+             " at all, so the row repeated its first date forever.");
+  }
+  return out.join(" ");
+}
+
+function paneImport(){
+  const pane = el("div");
+  const S = state.importDraft;
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Import transactions"));
+  sec.appendChild(h);
+  sec.appendChild(el("p", "lede",
+    "Drop your bank's download here. OFX and QFX (the “download to Quicken” option) carry a bank-issued " +
+    "id on every row, so re-importing the same file can never double up. CSV works too and is deduped on " +
+    "date, amount and payee. Nothing is written until you press Add."));
+
+  if (!state.accounts.length){
+    const b = el("div", "banner warn");
+    b.appendChild(el("div", "sp", "Add an account first — imported rows have to land somewhere."));
+    sec.appendChild(b); pane.appendChild(sec); return pane;
+  }
+
+  const tools = el("div", "tools");
+  const accSel = el("select");
+  accSel.id = "imp-acct";
+  accSel.style.maxWidth = "220px";
+  accSel.style.padding = "6px 9px";
+  accSel.style.border = "1px solid var(--line-2)";
+  accSel.style.borderRadius = "var(--r)";
+  accSel.style.background = "var(--surface)";
+  accSel.style.color = "var(--ink)";
+  for (const a of state.accounts){
+    const o = el("option", "", a.name || "(unnamed)");
+    o.value = a.id;
+    if (S.accountId === a.id) o.selected = true;
+    accSel.appendChild(o);
+  }
+  accSel.addEventListener("change", () => { S.accountId = accSel.value; if (S.raw) runImportPreview(); else render(); });
+  tools.appendChild(accSel);
+
+  const fileLbl = el("label", "btn primary", "Choose a file");
+  const file = el("input");
+  file.type = "file";
+  file.accept = ".ofx,.qfx,.csv,.txt,text/csv,text/plain";
+  file.hidden = true;
+  file.addEventListener("change", async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    S.raw = await f.text();
+    S.name = f.name;
+    S.accountId = accSel.value;
+    runImportPreview();
+    file.value = "";
+  });
+  fileLbl.appendChild(file);
+  tools.appendChild(fileLbl);
+
+  const pasteBtn = el("button", "btn", "Paste instead");
+  pasteBtn.type = "button";
+  pasteBtn.addEventListener("click", () => {
+    const box = document.getElementById("impPaste");
+    if (box) box.hidden = !box.hidden;
+  });
+  tools.appendChild(pasteBtn);
+
+  if (S.rows && S.rows.length){
+    const clear = el("button", "btn ghost", "Discard");
+    clear.type = "button";
+    clear.addEventListener("click", () => { state.importDraft = {accountId:S.accountId}; render(); });
+    tools.appendChild(clear);
+  }
+  sec.appendChild(tools);
+
+  const paste = el("div");
+  paste.id = "impPaste";
+  paste.hidden = !!(S.rows && S.rows.length);
+  const ta = el("textarea", "io");
+  ta.id = "impText";
+  ta.placeholder = "Paste OFX/QFX text, or rows copied straight out of your bank's web page.";
+  paste.appendChild(ta);
+  const pt = el("div", "tools");
+  pt.style.marginTop = "10px";
+  const doPaste = el("button", "btn", "Read this");
+  doPaste.type = "button";
+  doPaste.addEventListener("click", () => {
+    S.raw = document.getElementById("impText").value;
+    S.name = "pasted";
+    S.accountId = accSel.value;
+    runImportPreview();
+  });
+  pt.appendChild(doPaste);
+  paste.appendChild(pt);
+  sec.appendChild(paste);
+  pane.appendChild(sec);
+
+  if (S.error){
+    const b = el("div", "banner warn");
+    b.appendChild(el("div", "sp", S.error));
+    pane.appendChild(b);
+  }
+  if (!S.rows || !S.rows.length) return pane;
+
+  // ---------- preview ----------
+  const fresh = S.rows.filter(r => r.bucket === "new");
+  const dupes = S.rows.filter(r => r.bucket === "dupe");
+
+  const cards = el("div", "cards");
+  const mk = (k, v, s, cls) => {
+    const c = el("div", "card");
+    c.appendChild(el("div", "k", k));
+    const vv = el("div", "v"); if (cls) vv.style.color = "var(--" + cls + ")";
+    vv.textContent = v; c.appendChild(vv);
+    c.appendChild(el("div", "s", s));
+    return c;
+  };
+  const matched = fresh.filter(r => r.match);
+  cards.appendChild(mk("To add", String(fresh.length), S.name + " · " + S.kind, "pos"));
+  cards.appendChild(mk("Already have", String(dupes.length), "skipped", dupes.length ? "warn" : ""));
+  cards.appendChild(mk("Planned bills paid", String(matched.length),
+    matched.length ? "these stop being projected" : "none recognised", matched.length ? "pos" : ""));
+  cards.appendChild(mk("Net", money0(fresh.reduce((s, r) => s + r.amount_c, 0)), "of the new rows"));
+  cards.appendChild(mk("Range", fresh.length ? shortDate(fresh[0].date) + " – " + shortDate(fresh[fresh.length-1].date) : "—", "dates covered"));
+  pane.appendChild(cards);
+
+  const sec2 = el("div", "sec");
+  const catOpts = [{value:"", label:"— uncategorised —"}]
+    .concat(state.categories.map(c => ({value:c.id, label:c.group + " · " + c.name})));
+  const cols = [
+    {label:"", w:"34px", cell:(r) => {
+        const c = el("div", "gc act");
+        const b = el("input"); b.type = "checkbox"; b.checked = r.bucket === "new";
+        b.style.width = "auto"; b.style.margin = "0";
+        b.addEventListener("change", () => { r.bucket = b.checked ? "new" : "dupe"; render(); });
+        c.appendChild(b);
+        return c;
+      }},
+    {label:"Date", w:"minmax(110px,.8fr)", cell:(r) => cellReadonly(shortDate(r.date))},
+    {label:"Payee", w:"minmax(200px,2fr)", cell:(r) => cellReadonly(r.payee || "(none)", "lbl")},
+    {label:"Category", w:"minmax(170px,1.2fr)",
+      cell:(r) => cellSelect(r, "categoryId", catOpts, v => { r.categoryId = v; })},
+    {label:"Amount", w:"minmax(110px,.8fr)", cell:(r) => {
+        const c = el("div", "gc ro");
+        c.appendChild(el("span", "num " + (r.amount_c > 0 ? "pos" : "neg"), money(r.amount_c)));
+        return c;
+      }},
+    {label:"Status", w:"minmax(230px,1.6fr)", cell:(r) => {
+        const c = el("div", "gc ro lbl");
+        if (r.bucket === "dupe"){
+          c.appendChild(el("span", "tag neg", r.why || "duplicate"));
+          return c;
+        }
+        if (r.match){
+          const t = el("span", "tag lock", "pays " + r.match.name);
+          t.title = "Matches the planned " + r.match.name + " of " + money(r.match.planned_c) +
+                    " due " + longDate(r.match.occDate) + ". That occurrence will stop being projected.";
+          c.appendChild(t);
+          const un = el("button", "xbtn", "×");
+          un.type = "button";
+          un.title = "Not this bill — treat it as extra spending";
+          un.addEventListener("click", () => { r.match = null; render(); });
+          c.appendChild(un);
+        } else {
+          c.appendChild(el("span", "tag", r.fitid ? "new · bank id" : "new"));
+        }
+        return c;
+      }}
+  ];
+  const shown = S.rows.slice(0, 300);
+  sec2.appendChild(gridTable(cols, shown.map(r => ({item:r})), {emptyText:"Nothing parsed."}));
+  if (S.rows.length > shown.length)
+    sec2.appendChild(el("p", "lede", "Showing the first 300 of " + S.rows.length + " rows; all will be imported."));
+
+  const commit = el("div", "tools");
+  commit.style.marginTop = "14px";
+  const go = el("button", "btn primary", "Add " + fresh.length + " transaction" + (fresh.length === 1 ? "" : "s"));
+  go.type = "button";
+  go.disabled = !fresh.length;
+  go.addEventListener("click", commitImport);
+  commit.appendChild(go);
+  sec2.appendChild(commit);
+  pane.appendChild(sec2);
+  return pane;
+}
+
+function runImportPreview(){
+  const S = state.importDraft;
+  S.error = null; S.rows = null;
+  const raw = S.raw || "";
+  const acct = S.accountId || (state.accounts[0] && state.accounts[0].id) || "";
+  S.accountId = acct;
+  try {
+    let cands;
+    if (/<OFX>/i.test(raw) || /^OFXHEADER/im.test(raw)){
+      S.kind = "OFX";
+      cands = ofxCandidates(raw, acct);
+    } else {
+      S.kind = "CSV";
+      const delim = sniffDelimiter(raw);
+      const rows = parseCSV(raw, delim);
+      if (rows.length < 2) throw new Error("That doesn't look like a table — I found fewer than two rows.");
+      const map = inferRoles(rows[0], rows.slice(1));
+      if (map.date == null) throw new Error("I couldn't find a date column. Check the file has a header row.");
+      if (map.amount == null && map.debit == null && map.credit == null)
+        throw new Error("I couldn't find an amount column.");
+      const fmt = detectDateFormat(rows.slice(1).map(r => r[map.date]));
+      cands = rowsToCandidates(rows.slice(1), map, fmt, acct);
+      S.map = map; S.fmt = fmt;
+    }
+    if (!cands.length) throw new Error("No transactions found in that file.");
+    cands.sort((a, b) => a.date.localeCompare(b.date));
+    S.rows = attachMatches(classifyImport(cands, buildImportIndex()));
+  } catch (e){
+    S.error = e.message || String(e);
+  }
+  render();
+}
+
+function commitImport(){
+  const S = state.importDraft;
+  const fresh = (S.rows || []).filter(r => r.bucket === "new");
+  if (!fresh.length) return;
+  const touched = {};
+  for (const r of fresh){
+    const mk = monthKey(r.date);
+    if (!state.txMonths[mk]) state.txMonths[mk] = [];
+    state.txMonths[mk].push({
+      id: uid("t"), date: r.date, payee: r.payee, categoryId: r.categoryId || "",
+      accountId: r.accountId, amount_c: r.amount_c, memo: r.memo || "",
+      fitid: r.fitid || null, cleared: true, imported: true,
+      satisfies: r.match ? {recId: r.match.recId, occDate: r.match.occDate} : null
+    });
+    touched[mk] = 1;
+  }
+  for (const mk of Object.keys(touched)) persistMonth(mk);
+  const months = Object.keys(touched).sort();
+  state.activeMonth = months[months.length - 1];
+  state.importDraft = {accountId: S.accountId};
+  state.tab = "txns";
+  render();
+  alert("Added " + fresh.length + " transaction" + (fresh.length === 1 ? "" : "s") +
+        " across " + months.length + " month" + (months.length === 1 ? "" : "s") + ".");
+}
+
+function paneData(){
+  const pane = el("div");
+
+  const sec = el("div", "sec");
+  const h = el("div", "sechead");
+  h.appendChild(el("h2", "", "Backup & restore"));
+  sec.appendChild(h);
+
+  const modeText = store.mode === "db"
+    ? "Saving to the artifact database — your data follows this page's link across devices, and survives every republish."
+    : store.mode === "local"
+    ? "Saving to this browser only. The artifact database isn't available in this view, so export a backup before you switch devices."
+    : "Not saving anywhere — storage is blocked in this view. Export a backup before you close the tab.";
+  sec.appendChild(el("p", "lede", modeText));
+
+  const tools = el("div", "tools");
+
+  const dl = el("button", "btn primary", "Download backup");
+  dl.type = "button";
+  dl.addEventListener("click", doExport);
+  tools.appendChild(dl);
+
+  const cp = el("button", "btn", "Copy JSON");
+  cp.type = "button";
+  cp.addEventListener("click", async () => {
+    const txt = JSON.stringify(exportPayload(), null, 2);
+    try { await navigator.clipboard.writeText(txt); cp.textContent = "Copied"; setTimeout(() => cp.textContent = "Copy JSON", 1600); }
+    catch (e){ showIO(txt); cp.textContent = "Select it below"; setTimeout(() => cp.textContent = "Copy JSON", 2200); }
+  });
+  tools.appendChild(cp);
+
+  const fileLbl = el("label", "btn", "Restore from file");
+  const file = el("input");
+  file.type = "file"; file.accept = ".json,application/json"; file.hidden = true;
+  file.addEventListener("change", async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    try { doImport(JSON.parse(await f.text())); }
+    catch (e){ alert("Couldn't read that file: " + e.message); }
+    file.value = "";
+  });
+  fileLbl.appendChild(file);
+  tools.appendChild(fileLbl);
+
+  const show = el("button", "btn", "Paste JSON");
+  show.type = "button";
+  show.addEventListener("click", () => showIO(""));
+  tools.appendChild(show);
+
+  const reset = el("button", "btn danger", "Clear everything");
+  reset.type = "button";
+  reset.addEventListener("click", clearAll);
+  tools.appendChild(reset);
+
+  sec.appendChild(tools);
+
+  const io = el("div");
+  io.id = "ioBox";
+  io.hidden = true;
+  const ta = el("textarea", "io");
+  ta.id = "ioText";
+  ta.setAttribute("aria-label", "Backup JSON");
+  io.appendChild(ta);
+  const ioTools = el("div", "tools");
+  ioTools.style.marginTop = "10px";
+  const apply = el("button", "btn primary", "Restore from this JSON");
+  apply.type = "button";
+  apply.addEventListener("click", () => {
+    try { doImport(JSON.parse(document.getElementById("ioText").value)); }
+    catch (e){ alert("That isn't valid backup JSON: " + e.message); }
+  });
+  const hide = el("button", "btn ghost", "Close");
+  hide.type = "button";
+  hide.addEventListener("click", () => { document.getElementById("ioBox").hidden = true; });
+  ioTools.appendChild(apply); ioTools.appendChild(hide);
+  io.appendChild(ioTools);
+  sec.appendChild(io);
+  pane.appendChild(sec);
+
+  // settings
+  const sec2 = el("div", "sec");
+  const h2 = el("div", "sechead");
+  h2.appendChild(el("h2", "", "Settings"));
+  sec2.appendChild(h2);
+  sec2.appendChild(el("p", "lede",
+    "How the app behaves. Your starting balances, the as-of date and the floor live on the "
+    + "Accounts tab, beside the balances they describe."));
+
+  const s = state.settings || blankSettings();
+
+  const f3 = el("div", "fld");
+  f3.appendChild(el("label", "", "Month-end rollover"));
+  const i3 = el("select"); i3.id = "set-overspend";
+  [["carry", "Carry each balance forward, positive or negative"],
+   ["carryPositiveOnly", "Carry only what is left over"],
+   ["reset", "Empty every envelope — carried in is always $0"]].forEach(([v, l]) => {
+    const o = el("option", "", l); o.value = v; if (s.overspendPolicy === v) o.selected = true; i3.appendChild(o);
+  });
+  i3.addEventListener("change", () => { s.overspendPolicy = i3.value; persistCore("settings"); render(); });
+  f3.appendChild(i3);
+  f3.appendChild(el("div", "hint",
+    "Emptying the envelopes returns whatever was left to To Be Budgeted, so nothing is lost — you simply " +
+    "assign it again from scratch each month. Carrying forward is what your old workbook did, and it is the " +
+    "only setting under which an unspent sinking fund keeps growing toward a big annual bill."));
+  sec2.appendChild(f3);
+
+  const f4 = el("div", "fld");
+  f4.appendChild(el("label", "", "Projection horizon"));
+  const i4 = el("select"); i4.id = "set-horizon";
+  [1, 3, 5, 10, 20, 30, 40, 50].forEach(n => {
+    const o = el("option", "", n + (n === 1 ? " year" : " years"));
+    o.value = String(n);
+    if ((s.horizonYears || 3) === n) o.selected = true;
+    i4.appendChild(o);
+  });
+  i4.addEventListener("change", () => { s.horizonYears = parseInt(i4.value, 10); persistCore("settings"); render(); });
+  f4.appendChild(i4);
+  f4.appendChild(el("div", "hint",
+    "How far the simulator and solver run. A long-dated compounding goal needs decades to be " +
+    "reachable at all; three years is right for judging the next few paydays."));
+  sec2.appendChild(f4);
+
+  pane.appendChild(sec2);
+
+  // ---------- start fresh on a date ----------
+  const sec3 = el("div", "sec");
+  const h3 = el("div", "sechead");
+  h3.appendChild(el("h2", "", "Start fresh"));
+  sec3.appendChild(h3);
+  sec3.appendChild(el("p", "lede",
+    "Draw a line and begin budgeting from a chosen date. Everything before it becomes history: envelope " +
+    "balances stop carrying forward, the projection re-anchors on that day's cash, and To Be Budgeted is " +
+    "reseeded. Your accounts, recurring rows and goals are kept, and nothing is deleted — earlier " +
+    "transactions simply stop feeding the budget."));
+
+  const cur = state.settings && state.settings.budgetStartMonth;
+  if (cur){
+    const b = el("div", "banner info");
+    const t = el("div", "sp");
+    t.appendChild(el("b", "", "Budgeting from " + monthLabel(cur) + ". "));
+    t.appendChild(document.createTextNode("Months before that are not in the carry chain."));
+    b.appendChild(t);
+    const undo = el("button", "btn sm", "Use all history again");
+    undo.type = "button";
+    undo.addEventListener("click", () => {
+      const s2 = state.settings;
+      s2.budgetStartMonth = null; s2.openingTBB_c = null;
+      persistCore("settings"); render();
+    });
+    b.appendChild(undo);
+    sec3.appendChild(b);
+  }
+
+  // default: the first of next month
+  const nextM = shiftMonth(monthKey(todayISO()), 1);
+  const f5 = el("div", "fld");
+  f5.appendChild(el("label", "", "Start budgeting on"));
+  const i5 = el("input"); i5.type = "date"; i5.id = "fresh-date"; i5.value = nextM + "-01";
+  f5.appendChild(i5);
+  sec3.appendChild(f5);
+
+  const f6 = el("div", "fld");
+  f6.appendChild(el("label", "", "Cash on that day"));
+  const i6 = el("input"); i6.type = "text"; i6.inputMode = "decimal"; i6.id = "fresh-cash";
+  const cashAcct = state.accounts.find(a => a.kind === "cash");
+  let projected = null;
+  if (cashAcct && state.recurrences.length){
+    try {
+      const sm = simulate();
+      const di = diffDays(sm.start, nextM + "-01");
+      if (di >= 0 && di <= sm.nDays) projected = sm.cash[di];
+    } catch (e){ projected = null; }
+  }
+  i6.value = projected != null ? fromCents(projected) : (cashAcct ? fromCents(cashAcct.openingBalance_c) : "0.00");
+  f6.appendChild(i6);
+  f6.appendChild(el("div", "hint", projected != null
+    ? "Pre-filled with the balance this plan projects for that day (" + money(projected) +
+      "). Replace it with the real figure when you get there."
+    : "What " + (cashAcct ? cashAcct.name : "your operating account") + " will hold that morning."));
+  sec3.appendChild(f6);
+
+  const f7 = el("div", "fld");
+  f7.appendChild(el("label", "", "Budgeted amounts"));
+  const i7 = el("select"); i7.id = "fresh-carry";
+  [["carry", "Keep them — copy this month's assignments forward"],
+   ["plan",  "Rebuild them from the recurring plan"],
+   ["empty", "Start with an empty budget"]].forEach(([v, l]) => {
+    const o = el("option", "", l); o.value = v; i7.appendChild(o);
+  });
+  f7.appendChild(i7);
+  f7.appendChild(el("div", "hint",
+    "Your income and expense rows are always kept — this is only about the Budgeted column on the " +
+    "budget grid."));
+  sec3.appendChild(f7);
+
+  const fresh = el("button", "btn primary", "Start fresh");
+  fresh.type = "button";
+  fresh.addEventListener("click", () => {
+    const dt = document.getElementById("fresh-date").value;
+    if (!dt) return;
+    const cash = toCents(document.getElementById("fresh-cash").value);
+    const mode = document.getElementById("fresh-carry").value;
+    const mk = monthKey(dt);
+    if (!confirm("Begin budgeting on " + longDate(dt) + "?\n\n" +
+                 "• The projection re-anchors on " + longDate(dt) + " with " + money(cash) + "\n" +
+                 "• Envelope balances before " + monthLabel(mk) + " stop carrying forward\n" +
+                 "• Income and expense rows, accounts and goals are all kept\n" +
+                 "• Nothing is deleted — you can undo this")) return;
+
+    // seed the new start month's Budgeted column before switching over
+    const prev = shiftMonth(mk, -1);
+    let seed = {};
+    if (mode === "carry"){
+      const src = (state.budgetMonths[prev] && state.budgetMonths[prev].budgeted) || {};
+      for (const k of Object.keys(src)) if (src[k] > 0) seed[k] = src[k];
+    } else if (mode === "plan"){
+      for (const c of state.categories){
+        const p = state.recurrences
+          .filter(x => x.kind === "expense" && x.categoryId === c.id)
+          .reduce((t, x) => t + perMonth(Math.abs(x.amount_c), x.frequency, x.intervalN), 0);
+        if (p > 0) seed[c.id] = p;
+      }
+    }
+    if (Object.keys(seed).length){
+      state.budgetMonths[mk] = {budgeted: seed};
+      persistBudget(mk);
+    }
+
+    const s2 = state.settings;
+    s2.asOfDate = dt;
+    s2.budgetStartMonth = mk;
+    s2.openingTBB_c = null;                       // reseed from cash
+    if (cashAcct) cashAcct.openingBalance_c = cash;
+    persistCore("settings");
+    if (cashAcct) persistCore("accounts");
+    state.budgetMonth = mk;
+    state.activeMonth = mk;
+    state.tab = "budget";
+    render();
+  });
+  sec3.appendChild(fresh);
+  pane.appendChild(sec3);
+  return pane;
+}
+
+function showIO(text){
+  const box = document.getElementById("ioBox");
+  const ta = document.getElementById("ioText");
+  if (!box || !ta) return;
+  box.hidden = false;
+  ta.value = text;
+  ta.focus();
+  if (text) ta.select();
+}
+
+async function doExport(){
+  const payload = JSON.stringify(exportPayload(), null, 2);
+  const name = "better-budget-" + todayISO() + ".json";
+  let dl = null;
+  try { dl = await window.claude?.use?.("downloads"); } catch (e){ dl = null; }
+  if (dl){
+    try { await dl.save({filename: name, data: payload}); return; }
+    catch (e){
+      const code = e && e.code ? e.code : "unavailable";
+      if (code === "declined") return;                 // viewer said no; never auto-retry
+      if (code === "rate_limited"){ alert("A save prompt is already open."); return; }
+      // anything else: fall through to the copy paths
+    }
+  }
+  // Outside the artifact sandbox (self-hosted, or a local file) an ordinary download link
+  // works perfectly well — try it before falling back to the clipboard.
+  try {
+    const blob = new Blob([payload], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 2000);
+    return;
+  } catch (e){ /* sandboxed: fall through */ }
+  try {
+    await navigator.clipboard.writeText(payload);
+    alert("Downloads aren't available in this view, so the backup is on your clipboard instead. Paste it into a file.");
+    return;
+  } catch (e){ /* fall through */ }
+  showIO(payload);
+  alert("Downloads aren't available in this view. The backup is in the box below — select all and copy it.");
+}
+
+function doImport(p){
+  applyPayload(p);
+  // Every collection has to be written back, not just the ones that live in core.
+  // Restoring into a FRESH account is the whole point of this button, and a month
+  // left unpersisted would sit in memory looking right until the next reload.
+  persistCore();
+  for (const k of Object.keys(state.txMonths)) persistMonth(k);
+  for (const k of Object.keys(state.budgetMonths)) persistBudget(k);
+  state.activeMonth = monthKey(todayISO());
+  if (state.budgetMonths[state.activeMonth]) state.budgetMonth = state.activeMonth;
+  render();
+  alert("Restored. " + state.accounts.length + " accounts, " +
+        state.recurrences.length + " recurring rows, " +
+        state.goals.length + " goals, " +
+        Object.keys(state.budgetMonths).length + " budget months, " +
+        Object.keys(state.txMonths).length + " months of transactions.");
+}
+
+function clearAll(){
+  if (!confirm("Delete every account, recurring row, goal and transaction in this budget?\n\nThis cannot be undone. Export a backup first if you're unsure.")) return;
+  state.settings = blankSettings();
+  state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
+  state.txMonths = {}; state.txMonths[state.activeMonth] = [];
+  state.exprs = {};
+  // Budget months were being left behind, so a "cleared" budget still carried every
+  // envelope figure the moment anything re-read them.
+  const hadBudget = Object.keys(state.budgetMonths);
+  state.budgetMonths = {};
+  state.sampleData = false;
+  persistCore();
+  persistMonth(state.activeMonth);
+  for (const k of hadBudget) persistBudget(k);
+  state.tab = "accounts";
+  render();
+}
+
+/* ============================================================
+   6. BOOT
+   ============================================================ */
+
+function initTheme(){
+  const btn = document.getElementById("themeBtn");
+  let pref = null;
+  try { pref = localStorage.getItem("bb-theme"); } catch (e){}
+  if (pref) document.documentElement.setAttribute("data-theme", pref);
+  btn.addEventListener("click", () => {
+    const now = document.documentElement.getAttribute("data-theme");
+    const dark = now ? now === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = dark ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("bb-theme", next); } catch (e){}
+  });
+}
+
+async function boot(){
+  initTheme();
+  state.settings = blankSettings();
+  state.accounts = []; state.categories = []; state.recurrences = []; state.goals = [];
+  state.txMonths = {}; state.budgetMonths = {};
+
+  if (cloudConfigured() && !sbInit()){
+    document.getElementById("panes").textContent =
+      "Could not load the Supabase client. Check your connection and reload.";
+    return;
+  }
+  setSave("", "loading…");
+  await loadAll();
+
+  if (store.mode === "anon"){
+    const msg = authLinkMessage();
+    clearAuthLink();
+    authGate(msg);
+    setSave("", "signed out");
+    return;
+  }
+  clearAuthLink();                // arrived via a confirmation link and already signed in
+
+  ensureBudgetHorizon();          // always some months planned ahead
+
+  for (const id of ["nav", "strip", "stripnote"]){
+    const n = document.getElementById(id);
+    if (n) n.hidden = false;
+  }
+  render();
+  if (store.mode === "supabase") mountAccountChip();
+}
+
+function mountAccountChip(){
+  const bar = document.querySelector(".topbar-in");
+  if (!bar || document.getElementById("whoami")) return;
+  const who = el("span", "savechip", sbUser && sbUser.email ? sbUser.email : "signed in");
+  who.id = "whoami";
+  const out = el("button", "btn sm ghost", "Sign out");
+  out.type = "button";
+  out.addEventListener("click", signOut);
+  const anchor = bar.querySelector("#themeBtn");
+  bar.insertBefore(who, anchor);
+  bar.insertBefore(out, anchor);
+}
+
+setTimeout(async () => {
+  await boot();
+  const out = {
+    mode: store.mode,
+    configured: cloudConfigured(),
+    fixtures: runFixtures().filter(x=>x.ok).length + '/' + runFixtures().length,
+    accounts: state.accounts.length,
+    recurrences: state.recurrences.length,
+    goals: state.goals.length,
+    txMonths: Object.keys(state.txMonths).length,
+    budgetMonths: Object.keys(state.budgetMonths).length,
+    hasRaiseCol: typeof amountOn === 'function',
+    hasExtraIncome: typeof addExtraIncome === 'function',
+    hasMilestoneKey: typeof milestoneKey === 'function',
+    hasBaseline: typeof captureBaseline === 'function',
+    hasOverage: typeof overageDialog === 'function',
+    hasRowCopy: typeof cellRowActions === 'function'
+  };
+  state.tab='dashboard'; render();
+  state.tab='budget'; render();
+  state.tab='income'; render();
+  state.tab='expenses'; render();
+  state.tab='goals'; render();
+  state.tab='accounts'; render();
+  out.allTabsRender = true;
+  console.log(JSON.stringify(out));
+}, 0);
