@@ -395,6 +395,28 @@ textarea.io:focus{outline:2px solid var(--focus); outline-offset:-1px}
 .opt .btn{margin:0 6px 0 0}
 .modal .foot{display:flex; gap:8px; justify-content:flex-end; margin-top:12px}
 
+.tbbwhy{margin-top:9px}
+.tbbwhy > summary{
+  cursor:pointer; font-family:var(--font-ui); font-size:11.5px; color:var(--ink-2);
+  list-style:none; display:inline-flex; align-items:center; gap:5px; user-select:none;
+}
+.tbbwhy > summary::-webkit-details-marker{display:none}
+.tbbwhy > summary::before{content:"\25b8"; font-size:10px; transition:transform .12s}
+.tbbwhy[open] > summary::before{transform:rotate(90deg)}
+.tbbwhy > summary:hover{color:var(--ink)}
+.whygrid{
+  display:grid; grid-template-columns:auto auto minmax(0,1fr); gap:2px 12px;
+  margin:9px 0 0; padding:9px 11px; border:1px solid var(--line); border-radius:8px;
+  background:var(--surface);
+}
+.whygrid .wl{font-family:var(--font-ui); font-size:12px; color:var(--ink-2)}
+.whygrid .wv{font-family:var(--font-mono); font-size:12px; text-align:right; color:var(--ink)}
+.whygrid .wn{font-family:var(--font-ui); font-size:11px; color:var(--muted)}
+.whygrid .sub{opacity:.72; font-size:11.5px}
+.whygrid .neg.wv{color:var(--neg)}
+.whygrid .tot{font-weight:700; color:var(--ink); border-top:1px solid var(--line-2); padding-top:4px; margin-top:3px}
+.whynote{font-family:var(--font-ui); font-size:11px; color:var(--muted); margin:8px 0 0; max-width:62ch}
+
 .planbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center;
   border:1px solid var(--line); border-radius:10px; background:var(--surface-2);
   padding:9px 12px; margin:0 0 12px}
@@ -5991,6 +6013,59 @@ function paneBudget(){
     : (freeTbb === 0 ? "Every dollar has a job."
        : (planned_c ? "Still unassigned, after " + money(planned_c) + " promised to the plan." : "Still unassigned."));
   l.appendChild(el("div", "s", msg));
+
+  // Every figure that made this number, named. An envelope that is quietly not
+  // counted is otherwise invisible: the row shows, the money looks assigned, and
+  // the total simply disagrees with no way to see why.
+  const why = el("details", "tbbwhy");
+  const sum = el("summary", "", "How this is worked out");
+  why.appendChild(sum);
+  const tbl = el("div", "whygrid");
+  const line = (label, amount_c, note, cls) => {
+    tbl.appendChild(el("div", "wl" + (cls ? " " + cls : ""), label));
+    tbl.appendChild(el("div", "wv num" + (cls ? " " + cls : ""), money(amount_c)));
+    tbl.appendChild(el("div", "wn", note || ""));
+  };
+  const openingTbb = M.tbb - M.income + M.budgetedTotal;
+  line("Carried in", openingTbb,
+       mk === (state.settings && state.settings.budgetStartMonth)
+         ? "your starting figure" : "left over from " + monthLabel(shiftMonth(mk, -1)));
+  line("Income this month", M.income,
+       M.received > 0 && M.expected > 0
+         ? money(M.received) + " received, " + money(M.expected) + " still expected"
+         : (M.expected > 0 ? "all still expected" : "all received"));
+
+  // each group's share, so a missing one stands out
+  const incomeSet0 = incomeCategoryIds();
+  const byGroup = {};
+  for (const c of state.categories){
+    if (isIncomeCategory(c, incomeSet0)) continue;
+    const g = c.group || "Other";
+    byGroup[g] = (byGroup[g] || 0) + (M.budgeted[c.id] || 0);
+  }
+  line("Budgeted to envelopes", -M.budgetedTotal, Object.keys(byGroup).length + " groups", "neg");
+  for (const g of Object.keys(byGroup).sort()){
+    if (!byGroup[g]) continue;
+    line("\u2003" + g, -byGroup[g], "", "sub");
+  }
+  if (planned_c) line("Promised to the plan", -planned_c, "extra toward your goals", "neg");
+  line("Left to be budgeted", freeTbb, "", "tot");
+
+  // Anything deliberately kept out of the envelope maths is stated, not hidden.
+  const skipped = state.categories.filter(c => isIncomeCategory(c, incomeSet0));
+  if (skipped.length){
+    const nte = el("p", "whynote");
+    nte.textContent = "Not an envelope, so never counted here: " +
+      skipped.map(c => c.name).join(", ") +
+      ". A category counts as income when an income row posts to it, or when its group is called Income. " +
+      "If something you budget to is listed here, move it out of the Income group or point that income row " +
+      "at a different category.";
+    why.appendChild(tbl);
+    why.appendChild(nte);
+  } else {
+    why.appendChild(tbl);
+  }
+  l.appendChild(why);
   top.appendChild(l);
 
   const r = el("div", "tbbr");
